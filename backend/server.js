@@ -204,6 +204,106 @@ function runCodexTurn(session, userMessage, ws) {
   });
 }
 
+// ─── Catch-up poll for externally-running Windsurf cascades ──────────────
+// Called when load_session finds a Windsurf session with threadId but no active run.
+// Checks if the cascade is still RUNNING and, if so, starts a live polling loop.
+async function startCatchUpPoll(session) {
+  try {
+    const servers = await windsurf.detectLanguageServersWithPath();
+    if (!servers.length) return;
+    const server =
+      servers.find((s) => s.workspacePath && session.cwd.startsWith(s.workspacePath)) ||
+      servers[0];
+
+    const cascadeId = session.threadId;
+    const status = await windsurf.getTrajectoryStatus(server, cascadeId);
+    const isRunning = String(status?.status || '').includes('RUNNING');
+    if (!isRunning) return;
+
+    // Claim the run slot
+    const run = activeRuns.get(session.id);
+    if (!run || run.cascadeId) return; // another turn already claimed it
+    run.cascadeId = cascadeId;
+    run.buffer = [];
+    run.cancelled = false;
+    run.serverInfo = server;
+
+    broadcast(session.id, { type: 'turn_running', sessionId: session.id });
+
+    // Start slightly behind current tip so we catch in-progress steps
+    const startOffset = Math.max(0, (status.numTotalSteps || 0) - 20);
+    let nextFetchFrom = startOffset;
+    let highWaterMark = startOffset;
+    const seenDoneIdx = new Set();
+    let lastAssistantText = '';
+    const items = [];
+
+    const maxIterations = 600;
+    for (let i = 0; i < maxIterations; i++) {
+      if (run.cancelled || run.cascadeId !== cascadeId) break;
+      await new Promise((r) => setTimeout(r, 700));
+
+      let steps;
+      try { steps = await windsurf.getTrajectorySteps(server, cascadeId, nextFetchFrom); }
+      catch { continue; }
+
+      let firstStillRunning = -1;
+      for (let si = 0; si < steps.length; si++) {
+        const st = steps[si];
+        const absIdx = nextFetchFrom + si;
+        highWaterMark = Math.max(highWaterMark, absIdx + 1);
+
+        const ev = windsurf.translateStep(st);
+        if (!ev) {
+          if (st.status !== 'CORTEX_STEP_STATUS_DONE' && firstStillRunning < 0)
+            firstStillRunning = absIdx;
+          continue;
+        }
+
+        if (ev.kind === 'assistant_message') {
+          lastAssistantText = ev.text;
+          broadcast(session.id, { type: 'event', sessionId: session.id, event: { type: 'cascade.step', step: ev } });
+          if (st.status !== 'CORTEX_STEP_STATUS_DONE' && firstStillRunning < 0)
+            firstStillRunning = absIdx;
+        } else if (ev.kind === 'tool' && st.status === 'CORTEX_STEP_STATUS_DONE' && !seenDoneIdx.has(absIdx)) {
+          seenDoneIdx.add(absIdx);
+          items.push({ type: ev.tool, summary: ev.summary });
+          broadcast(session.id, { type: 'event', sessionId: session.id, event: { type: 'cascade.step', step: ev } });
+        }
+      }
+
+      if (firstStillRunning >= 0) {
+        nextFetchFrom = firstStillRunning;
+      } else {
+        nextFetchFrom = highWaterMark;
+        // All fetched steps are DONE — check if trajectory itself finished
+        try {
+          const cur = await windsurf.getTrajectoryStatus(server, cascadeId);
+          if (!String(cur?.status || '').includes('RUNNING')) {
+            // Save response if not already persisted
+            if (lastAssistantText) {
+              const s = store.get(session.id);
+              const last = s?.messages?.[s.messages.length - 1];
+              if (!last || last.role !== 'assistant' || last.content !== lastAssistantText) {
+                store.appendMessage(session.id, { role: 'assistant', content: lastAssistantText, items });
+                broadcastAll({ type: 'session_updated', session: store.get(session.id) });
+              }
+            }
+            break;
+          }
+        } catch { break; }
+      }
+    }
+
+    broadcast(session.id, { type: 'turn_done', sessionId: session.id, exitCode: 0 });
+  } catch (e) {
+    console.error('[catch-up poll] error:', e.message);
+  } finally {
+    const run = activeRuns.get(session.id);
+    if (run) { run.cascadeId = null; run.cancelled = false; }
+  }
+}
+
 // ─── Run a chat turn (Windsurf Cascade LS) ────────────────────────────────
 
 async function runWindsurfTurn(session, userMessage, ws) {
@@ -417,6 +517,10 @@ wss.on('connection', (ws) => {
             for (const buffered of (run.buffer || [])) {
               ws.send(buffered);
             }
+          } else if (s.provider === 'windsurf' && s.threadId) {
+            // No active run tracked — check if Windsurf is still running this cascade
+            // and start a catch-up poll if so (fire-and-forget)
+            startCatchUpPoll(s).catch(() => {});
           }
           break;
         }
