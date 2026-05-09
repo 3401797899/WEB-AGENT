@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
 import 'highlight.js/styles/github-dark.css';
 import CodeBlock from './CodeBlock';
-import ToolItem from './ToolItem';
+import ToolItem, { ThinkingBlock } from './ToolItem';
 
 // Live view of an in-progress turn.
 // Builds an interleaved timeline so tool calls and assistant text appear
@@ -28,9 +28,22 @@ export default function StreamingTurn({ events, turnRunning }) {
       if (evt.type === 'cascade.step' && evt.step) {
         const s = evt.step;
         if (s.kind === 'assistant_message') {
+          // Carry thinking into timeline (coalesce into nearest thinking entry)
+          if (s.thinking) {
+            const prevThink = tl.findLast?.((e) => e.kind === 'thinking') ??
+              [...tl].reverse().find((e) => e.kind === 'thinking');
+            if (prevThink) {
+              prevThink.thinking = s.thinking;
+            } else {
+              tl.push({ kind: 'thinking', thinking: s.thinking });
+            }
+          }
           // Cascade streams updates to the same step; coalesce into one entry
           const last = tl[tl.length - 1];
-          if (last?.kind === 'text') {
+          const lastText = last?.kind === 'text' ? last : [...tl].reverse().find((e) => e.kind === 'text');
+          if (lastText && !s.text && s.thinking) {
+            // thinking-only update, no text change
+          } else if (last?.kind === 'text') {
             last.content = s.text; // streaming update in-place
           } else if (s.text) {
             tl.push({ kind: 'text', content: s.text });
@@ -66,6 +79,8 @@ export default function StreamingTurn({ events, turnRunning }) {
         {timeline.map((entry, i) =>
           entry.kind === 'tool' ? (
             <ToolItem key={i} item={entry.item} />
+          ) : entry.kind === 'thinking' ? (
+            <ThinkingBlock key={i} text={entry.thinking} live={turnRunning} />
           ) : (
             <div key={i} className="markdown-body mt-1 first:mt-0">
               <ReactMarkdown

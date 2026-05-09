@@ -331,12 +331,24 @@ function translateStep(step) {
         kind: 'user_input',
         text: payload?.userResponse || (payload?.items?.[0]?.text ?? ''),
       };
-    case 'plannerResponse':
+    case 'plannerResponse': {
+      let text = payload?.modifiedResponse || payload?.response || '';
+      // Extract <thinking> tags if embedded in text
+      let thinking = payload?.thinking || payload?.internalThinking || payload?.scratchpad || '';
+      if (!thinking) {
+        const m = text.match(/<thinking>([\s\S]*?)<\/thinking>/i);
+        if (m) {
+          thinking = m[1].trim();
+          text = text.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '').trim();
+        }
+      }
       return {
         kind: 'assistant_message',
-        text: payload?.modifiedResponse || payload?.response || '',
+        thinking,
+        text,
         messageId: payload?.messageId,
       };
+    }
     case 'runCommand':
       return {
         kind: 'tool',
@@ -346,29 +358,64 @@ function translateStep(step) {
       };
     case 'writeToFile':
     case 'proposeCode':
+    case 'codeAction':
+    case 'applyEdit':
+    case 'editFile':
       return {
         kind: 'tool',
-        tool: stepKey,
-        summary: payload?.targetFile || payload?.uri || '',
+        tool: 'proposeCode',
+        summary:
+          payload?.targetFile || payload?.uri || payload?.path ||
+          payload?.edit?.uri || payload?.filePath || '',
         details: payload,
       };
     case 'viewFile':
-    case 'grepSearch':
-    case 'listDirectory':
-    case 'find':
-    case 'readUrlContent':
-    case 'searchKnowledgeBase':
-    case 'lookupKnowledgeBase':
     case 'viewCodeItem':
       return {
         kind: 'tool',
         tool: stepKey,
         summary:
-          payload?.query ||
-          payload?.targetFile ||
-          payload?.absolutePath ||
-          payload?.url ||
-          '',
+          payload?.absolutePath || payload?.targetFile ||
+          payload?.filePath || payload?.path || payload?.uri ||
+          payload?.fileUri || '',
+        details: payload,
+      };
+    case 'grepSearch':
+      return {
+        kind: 'tool',
+        tool: stepKey,
+        summary: payload?.query || payload?.searchQuery || '',
+        details: payload,
+      };
+    case 'listDirectory':
+      return {
+        kind: 'tool',
+        tool: stepKey,
+        summary:
+          payload?.absolutePath || payload?.directoryPath ||
+          payload?.path || payload?.dirPath || '',
+        details: payload,
+      };
+    case 'find':
+      return {
+        kind: 'tool',
+        tool: stepKey,
+        summary: payload?.nameGlob || payload?.pattern || payload?.query || '',
+        details: payload,
+      };
+    case 'readUrlContent':
+      return {
+        kind: 'tool',
+        tool: stepKey,
+        summary: payload?.url || '',
+        details: payload,
+      };
+    case 'searchKnowledgeBase':
+    case 'lookupKnowledgeBase':
+      return {
+        kind: 'tool',
+        tool: stepKey,
+        summary: payload?.query || payload?.searchQuery || '',
         details: payload,
       };
     case 'errorMessage':
