@@ -26,10 +26,13 @@ export default function App() {
   const [connected, setConnected] = useState(false);
   const [toast, setToast] = useState(null);
   const [loadingHistory, setLoadingHistory] = useState(false);
+  const [windsurfQuota, setWindsurfQuota] = useState(null);
   const wsRef = useRef(null);
   const activeIdRef = useRef(null);
+  const activeProviderRef = useRef(null);
 
   useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
+  useEffect(() => { activeProviderRef.current = activeSession?.provider ?? null; }, [activeSession?.provider]);
 
   const sendWs = useCallback((msg) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -81,12 +84,18 @@ export default function App() {
               const id = msg.sessions[0].id;
               setActiveId(id);
               ws.send(JSON.stringify({ type: 'load_session', sessionId: id }));
+              if (msg.sessions[0].provider === 'windsurf') {
+                ws.send(JSON.stringify({ type: 'get_windsurf_quota' }));
+              }
             }
             break;
           }
           case 'session_data': {
             setActiveSession(msg.session);
             setStreamingEvents([]);
+            if (msg.session.provider === 'windsurf') {
+              ws.send(JSON.stringify({ type: 'get_windsurf_quota' }));
+            }
             break;
           }
           case 'session_created': {
@@ -136,6 +145,10 @@ export default function App() {
             if (msg.sessionId === activeIdRef.current) {
               setTurnRunning(false);
               setStreamingEvents([]);
+              // Refresh windsurf quota after each turn
+              if (activeProviderRef.current === 'windsurf') {
+                ws.send(JSON.stringify({ type: 'get_windsurf_quota' }));
+              }
             }
             break;
           }
@@ -145,6 +158,10 @@ export default function App() {
               setStreamingEvents([]);
               showToast('Turn cancelled', 'info');
             }
+            break;
+          }
+          case 'windsurf_quota': {
+            setWindsurfQuota(msg.error ? { error: msg.error } : (msg.data || {}));
             break;
           }
           case 'history_loaded': {
@@ -173,8 +190,14 @@ export default function App() {
     setActiveId(id);
     setStreamingEvents([]);
     setTurnRunning(false);
+    setWindsurfQuota(null);
     sendWs({ type: 'load_session', sessionId: id });
-  }, [sendWs]);
+    // Fetch quota if session is windsurf
+    const s = sessions.find((s) => s.id === id);
+    if (s?.provider === 'windsurf') {
+      sendWs({ type: 'get_windsurf_quota' });
+    }
+  }, [sendWs, sessions]);
 
   const createSession = useCallback((provider, cwd) => {
     sendWs({ type: 'create_session', provider, cwd });
@@ -321,6 +344,8 @@ export default function App() {
           onModelChange={(uid) => updateModel(activeSession.id, uid)}
           reasoningEffort={activeSession.reasoningEffort}
           onReasoningEffortChange={(e) => updateReasoningEffort(activeSession.id, e)}
+          windsurfQuota={windsurfQuota}
+          onRefreshQuota={() => sendWs({ type: 'get_windsurf_quota' })}
         />
       )}
 

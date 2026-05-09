@@ -575,6 +575,23 @@ wss.on('connection', (ws) => {
           break;
         }
 
+        case 'get_windsurf_quota': {
+          try {
+            const servers = windsurf.detectLanguageServers();
+            let capacity = {};
+            if (servers.length) {
+              try { capacity = await windsurf.checkCapacity(servers[0]); } catch (_) {}
+            }
+            const dbData = windsurf.getQuotaFromDb() || {};
+            const data = { ...capacity, db: dbData };
+            console.log('[quota] raw:', JSON.stringify(data));
+            ws.send(JSON.stringify({ type: 'windsurf_quota', data }));
+          } catch (e) {
+            ws.send(JSON.stringify({ type: 'windsurf_quota', error: e.message }));
+          }
+          break;
+        }
+
         case 'list_windsurf_workspaces': {
           try {
             const servers = await windsurf.detectLanguageServersWithPath();

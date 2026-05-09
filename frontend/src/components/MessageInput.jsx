@@ -6,6 +6,13 @@ const SpeechRec = typeof window !== 'undefined'
   ? window.SpeechRecognition || window.webkitSpeechRecognition
   : null;
 
+function getCapacityStatus(data) {
+  if (!data || data.error) return null;
+  if (data.hasCapacity === true)  return 'ok';
+  if (data.hasCapacity === false) return 'full';
+  return null;
+}
+
 const EFFORT_LEVELS = [
   { value: 'low',        label: '低' },
   { value: 'medium',     label: '中' },
@@ -13,7 +20,7 @@ const EFFORT_LEVELS = [
   { value: 'extra_high', label: '极高' },
 ];
 
-export default function MessageInput({ onSend, onCancel, turnRunning, provider, modelUid, onModelChange, reasoningEffort, onReasoningEffortChange }) {
+export default function MessageInput({ onSend, onCancel, turnRunning, provider, modelUid, onModelChange, reasoningEffort, onReasoningEffortChange, windsurfQuota, onRefreshQuota }) {
   const [value, setValue] = useState('');
   const [listening, setListening] = useState(false);
   const [showTemplates, setShowTemplates] = useState(false);
@@ -93,7 +100,7 @@ export default function MessageInput({ onSend, onCancel, turnRunning, provider, 
         />
       )}
 
-      {(onModelChange || (provider === 'codex' && onReasoningEffortChange)) && (
+      {(onModelChange || (provider === 'codex' && onReasoningEffortChange) || provider === 'windsurf') && (
         <div className="px-3 pt-2 flex items-center gap-3 flex-wrap">
           {onModelChange && (
             <div className="flex items-center gap-2">
@@ -106,6 +113,44 @@ export default function MessageInput({ onSend, onCancel, turnRunning, provider, 
               />
             </div>
           )}
+          {provider === 'windsurf' && (() => {
+            const status = getCapacityStatus(windsurfQuota);
+            return (
+              <div className="flex items-center gap-2 ml-auto">
+                {windsurfQuota?.error ? (
+                  <span className="text-xs text-red-400 opacity-70" title={windsurfQuota.error}>配额获取失败</span>
+                ) : status === 'ok' ? (
+                  <span className="flex items-center gap-1.5 text-xs text-emerald-400">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block" />
+                    配额充足
+                  </span>
+                ) : status === 'full' ? (
+                  <span className="flex items-center gap-1.5 text-xs text-red-400">
+                    <span className="w-1.5 h-1.5 rounded-full bg-red-400 inline-block" />
+                    配额已用尽
+                  </span>
+                ) : windsurfQuota !== null ? (
+                  <span className="text-xs text-gray-500">配额未知</span>
+                ) : (
+                  <span className="text-xs text-gray-600">配额查询中…</span>
+                )}
+                {onRefreshQuota && (
+                  <button
+                    onClick={onRefreshQuota}
+                    disabled={turnRunning}
+                    className="text-gray-600 hover:text-gray-300 transition-colors disabled:opacity-40"
+                    title="刷新配额"
+                  >
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                      <path d="M3 3v5h5" />
+                    </svg>
+                  </button>
+                )}
+              </div>
+            );
+          })()}
+
           {provider === 'codex' && onReasoningEffortChange && (
             <div className="flex items-center gap-2">
               <span className="text-xs text-gray-500">思考</span>

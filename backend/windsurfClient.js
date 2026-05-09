@@ -209,6 +209,37 @@ async function checkCapacity(server) {
   return rpc(server, 'CheckChatCapacity', { metadata });
 }
 
+// Read cached quota / account info from the local Windsurf SQLite state db.
+// Windsurf may cache flow-action counts in windsurfAuthStatus or related keys.
+function getQuotaFromDb() {
+  const home = require('os').homedir();
+  const dbPath = path.join(
+    home,
+    'Library/Application Support/Windsurf/User/globalStorage/state.vscdb'
+  );
+  let db;
+  try {
+    db = new Database(dbPath, { readonly: true });
+  } catch (e) {
+    return null;
+  }
+  try {
+    // Scan all keys for anything quota/flow/capacity related
+    const rows = db.prepare(
+      "SELECT key, value FROM ItemTable WHERE key LIKE '%quota%' OR key LIKE '%flow%' OR key LIKE '%capacity%' OR key LIKE '%Auth%' OR key LIKE '%auth%'"
+    ).all();
+    const result = {};
+    for (const row of rows) {
+      try { result[row.key] = JSON.parse(row.value); } catch { result[row.key] = row.value; }
+    }
+    return result;
+  } catch (e) {
+    return null;
+  } finally {
+    db.close();
+  }
+}
+
 async function listTrajectories(server) {
   const metadata = buildMetadata(getApiKey());
   const r = await rpc(server, 'GetAllCascadeTrajectories', { metadata });
@@ -371,6 +402,7 @@ module.exports = {
   detectLanguageServersWithPath,
   getApiKey,
   checkCapacity,
+  getQuotaFromDb,
   listTrajectories,
   startCascade,
   sendMessage,
