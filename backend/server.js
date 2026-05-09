@@ -85,7 +85,7 @@ function runCodexTurn(session, userMessage, ws) {
   // `--cd` is only valid at the parent `exec` level (not after `resume`).
   // We pass `-` so prompt is read from stdin (avoids quoting issues with long messages).
   const modelArgs = session.modelUid ? ['--model', session.modelUid] : [];
-  const effortArgs = session.reasoningEffort ? ['--reasoning-effort', session.reasoningEffort] : [];
+  const effortArgs = session.reasoningEffort ? ['-c', `reasoning_effort="${session.reasoningEffort}"`] : [];
   let baseArgs;
   if (session.threadId) {
     // codex exec [--model <m>] [--reasoning-effort <e>] --cd <cwd> resume <id> --json --skip-git-repo-check -
