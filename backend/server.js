@@ -86,14 +86,14 @@ function runCodexTurn(session, userMessage, ws) {
   // We pass `-` so prompt is read from stdin (avoids quoting issues with long messages).
   const modelArgs = session.modelUid ? ['--model', session.modelUid] : [];
   const effortArgs = session.reasoningEffort ? ['-c', `reasoning_effort="${session.reasoningEffort}"`] : [];
+  // Allow codex to write files in the workspace (not read-only sandboxed)
+  const sandboxArgs = ['-s', 'workspace-write'];
   let baseArgs;
   if (session.threadId) {
-    // codex exec [--model <m>] [--reasoning-effort <e>] --cd <cwd> resume <id> --json --skip-git-repo-check -
-    baseArgs = ['exec', ...modelArgs, ...effortArgs, '--cd', session.cwd, 'resume', session.threadId,
+    baseArgs = ['exec', ...modelArgs, ...effortArgs, ...sandboxArgs, '--cd', session.cwd, 'resume', session.threadId,
                 '--json', '--skip-git-repo-check', '-'];
   } else {
-    // codex exec [--model <m>] [--reasoning-effort <e>] --json --skip-git-repo-check --cd <cwd> -
-    baseArgs = ['exec', ...modelArgs, ...effortArgs, '--json', '--skip-git-repo-check', '--cd', session.cwd, '-'];
+    baseArgs = ['exec', ...modelArgs, ...effortArgs, ...sandboxArgs, '--json', '--skip-git-repo-check', '--cd', session.cwd, '-'];
   }
 
   const { cmd, prefixArgs } = resolveExecutable(config.command);
