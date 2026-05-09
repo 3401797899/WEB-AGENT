@@ -112,45 +112,70 @@ export function ThinkingBlock({ text, live = false }) {
   );
 }
 
+// Strip ANSI escape codes and terminal control sequences from output
+function stripAnsi(str) {
+  return (str || '')
+    .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')   // CSI sequences
+    .replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g, '') // OSC sequences (title etc.)
+    .replace(/\x1b[()][AB012]/g, '')             // charset designations
+    .replace(/\x1b[=>]/g, '')                    // alt screen
+    .replace(/[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f]/g, '') // other control chars
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/[ \t]+$/gm, '')  // trailing whitespace per line
+    .replace(/\n{3,}/g, '\n\n') // collapse multiple blank lines
+    // Strip zsh/bash trailing prompt characters on their own line
+    .replace(/\n[%$#>]\s*\n?$/, '')
+    .trim();
+}
+
 function CommandBlock({ item }) {
-  const [open, setOpen] = useState(false);
-  const command =
-    item.command || item.cmd || item.summary ||
-    item.details?.command || item.details?.commandLine || '';
-  const output =
-    item.output || item.stdout ||
-    item.details?.output || item.details?.stdout || '';
-  const exitCode =
-    item.exitCode ?? item.exit_code ??
-    item.details?.exitCode ?? item.details?.exit_code;
-  const failed = exitCode !== undefined && exitCode !== null && exitCode !== 0;
-  const hasDetail = !!(output || item.details);
+  const d = item.details || {};
+  const command = d.commandLine || d.command || d.proposedCommandLine ||
+    item.command || item.cmd || item.summary || '';
+  const cwd = d.cwd || '';
+  const cwdName = cwd ? cwd.split('/').pop() || cwd : '';
+
+  const rawOutput =
+    d.combinedOutput?.full || d.combinedOutput?.ansiOutput ||
+    d.output || d.stdout || item.output || item.stdout || '';
+  const output = stripAnsi(rawOutput);
+
+  const exitCode = d.exitCode ?? d.exit_code ?? item.exitCode ?? item.exit_code;
+  const hasExitCode = exitCode !== undefined && exitCode !== null;
+  const failed = hasExitCode && exitCode !== 0;
+  const hasOutput = output.length > 0;
+
+  const [open, setOpen] = useState(failed); // auto-expand on failure
 
   return (
     <div className="my-1">
       <button
-        onClick={() => hasDetail && setOpen((v) => !v)}
-        className={`flex items-center gap-2 w-full text-left px-2 py-1.5 rounded-md text-xs transition-colors
-          ${failed ? 'bg-red-950/40 hover:bg-red-950/60' : 'bg-gray-900/70 hover:bg-gray-800/70'}`}
+        onClick={() => (hasOutput || d) && setOpen((v) => !v)}
+        className={`flex items-center gap-1.5 w-full text-left px-2 py-1.5 rounded-md text-xs transition-colors
+          ${failed ? 'bg-red-950/30 hover:bg-red-950/50' : 'bg-gray-900/60 hover:bg-gray-800/60'}`}
       >
-        <span className={`font-bold font-mono shrink-0 ${failed ? 'text-red-400' : 'text-emerald-400'}`}>$</span>
-        <code className={`flex-1 min-w-0 truncate font-mono ${failed ? 'text-red-200' : 'text-gray-200'}`}>
+        <span className={`font-bold font-mono shrink-0 text-[13px] leading-none ${failed ? 'text-red-400' : 'text-emerald-400'}`}>$</span>
+        <code className={`flex-1 min-w-0 truncate font-mono text-[11px] ${failed ? 'text-red-200' : 'text-gray-200'}`}>
           {command}
         </code>
-        {exitCode !== undefined && exitCode !== null && (
-          <span className={`text-[10px] px-1.5 py-0.5 rounded shrink-0 ${
-            failed ? 'text-red-300 bg-red-950/60' : 'text-emerald-300 bg-emerald-950/60'
+        {cwdName && (
+          <span className="text-gray-600 font-mono text-[10px] shrink-0 hidden sm:inline">{cwdName}</span>
+        )}
+        {hasExitCode && (
+          <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono shrink-0 ${
+            failed ? 'text-red-300 bg-red-950/60' : 'text-emerald-400/80 bg-emerald-950/40'
           }`}>
-            {exitCode}
+            {failed ? `✗ ${exitCode}` : '✓'}
           </span>
         )}
-        {hasDetail && (
+        {(hasOutput || d) && (
           <span className="text-gray-600 shrink-0">{open ? '▾' : '▸'}</span>
         )}
       </button>
       {open && (
-        <pre className="mt-0.5 ml-2 p-2 bg-black/60 rounded-md text-[10px] text-gray-300 overflow-x-auto max-h-48 font-mono leading-relaxed whitespace-pre-wrap border border-gray-800/50 select-text">
-          {output || JSON.stringify(item.details, null, 2)}
+        <pre className="mt-0.5 ml-2 p-2.5 rounded-md bg-[#0d1117] text-[11px] text-gray-300 overflow-x-auto max-h-64 font-mono leading-relaxed whitespace-pre-wrap select-text border border-gray-800/40 m-0">
+          {hasOutput ? output : <span className="text-gray-600 italic">(no output)</span>}
         </pre>
       )}
     </div>
