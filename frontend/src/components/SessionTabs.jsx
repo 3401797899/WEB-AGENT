@@ -1,23 +1,52 @@
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 
 export default function SessionTabs({ sessions, activeId, onSelect, onDelete, onRename }) {
-  const [menuId, setMenuId] = useState(null);
-  const [showAll, setShowAll] = useState(false);
+  const [menuId, setMenuId]         = useState(null);
+  const [menuPos, setMenuPos]       = useState({ top: 0, right: 0 });
+  const [confirmDel, setConfirmDel] = useState(false);
+  const [editingId, setEditingId]   = useState(null);
+  const [editValue, setEditValue]   = useState('');
+  const [showAll, setShowAll]       = useState(false);
+  const editRef = useRef(null);
 
   const dotColor = (provider) =>
     provider === 'codex' ? 'bg-blue-400' :
     provider === 'windsurf' ? 'bg-purple-400' : 'bg-gray-400';
 
-  const handleRename = (s) => {
-    setMenuId(null);
-    const next = prompt('Rename session:', s.title);
-    if (next && next.trim() && next !== s.title) onRename(s.id, next.trim());
+  const openMenu = (e, id) => {
+    e.stopPropagation();
+    if (menuId === id) { setMenuId(null); return; }
+    const rect = e.currentTarget.getBoundingClientRect();
+    setMenuPos({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
+    setMenuId(id);
+    setConfirmDel(false);
   };
 
-  const handleDelete = (s) => {
-    setMenuId(null);
-    if (confirm(`Delete "${s.title}"?\n\nThis cannot be undone.`)) onDelete(s.id);
+  const closeMenu = () => { setMenuId(null); setConfirmDel(false); };
+
+  const startRename = (s) => {
+    closeMenu();
+    setEditingId(s.id);
+    setEditValue(s.title);
+    setTimeout(() => editRef.current?.focus(), 30);
   };
+
+  const submitRename = (s) => {
+    const v = editValue.trim();
+    if (v && v !== s.title) onRename(s.id, v);
+    setEditingId(null);
+  };
+
+  useEffect(() => {
+    if (!menuId) return;
+    const handler = (e) => {
+      if (!e.target.closest('[data-session-menu]')) closeMenu();
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [menuId]);
+
+  const menuSession = sessions.find((s) => s.id === menuId);
 
   return (
     <>
@@ -32,52 +61,38 @@ export default function SessionTabs({ sessions, activeId, onSelect, onDelete, on
                   : 'border-transparent hover:bg-gray-800/20'
               }`}
             >
+              {editingId === s.id ? (
+                <input
+                  ref={editRef}
+                  value={editValue}
+                  onChange={(e) => setEditValue(e.target.value)}
+                  onBlur={() => submitRename(s)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') submitRename(s);
+                    if (e.key === 'Escape') setEditingId(null);
+                  }}
+                  className="pl-3 pr-1 py-2 w-32 bg-gray-700 text-white text-xs rounded outline-none focus:ring-1 focus:ring-emerald-500"
+                />
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => onSelect(s.id)}
+                  className={`flex items-center gap-2 pl-3 pr-1 py-2 whitespace-nowrap text-xs font-medium ${
+                    s.id === activeId ? 'text-white' : 'text-gray-400'
+                  }`}
+                >
+                  <span className={`w-1.5 h-1.5 rounded-full ${dotColor(s.provider)}`} />
+                  <span className="max-w-[140px] truncate">{s.title}</span>
+                </button>
+              )}
               <button
                 type="button"
-                onClick={() => onSelect(s.id)}
-                className={`flex items-center gap-2 pl-3 pr-1 py-2 whitespace-nowrap text-xs font-medium ${
-                  s.id === activeId ? 'text-white' : 'text-gray-400'
-                }`}
-              >
-                <span className={`w-1.5 h-1.5 rounded-full ${dotColor(s.provider)}`} />
-                <span className="max-w-[140px] truncate">{s.title}</span>
-              </button>
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setMenuId(menuId === s.id ? null : s.id);
-                }}
+                onClick={(e) => openMenu(e, s.id)}
                 className="px-2 text-gray-500 hover:text-white flex items-center text-base leading-none"
                 aria-label="Session menu"
               >
                 ⋯
               </button>
-
-              {menuId === s.id && (
-                <>
-                  <div
-                    className="fixed inset-0 z-10"
-                    onClick={() => setMenuId(null)}
-                  />
-                  <div className="absolute right-0 top-full mt-1 z-20 bg-gray-800 border border-gray-700 rounded-lg shadow-xl py-1 min-w-[160px]">
-                    <button
-                      type="button"
-                      onClick={() => handleRename(s)}
-                      className="w-full text-left px-3 py-2 text-xs hover:bg-gray-700 text-gray-200"
-                    >
-                      ✏️ Rename
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleDelete(s)}
-                      className="w-full text-left px-3 py-2 text-xs hover:bg-gray-700 text-red-400"
-                    >
-                      🗑 Delete
-                    </button>
-                  </div>
-                </>
-              )}
             </div>
           ))}
         </div>
@@ -94,6 +109,50 @@ export default function SessionTabs({ sessions, activeId, onSelect, onDelete, on
         </button>
       </div>
 
+      {/* Fixed dropdown — outside overflow-x-auto so it's never clipped */}
+      {menuId && menuSession && (
+        <div
+          data-session-menu
+          className="fixed z-50 bg-gray-800 border border-gray-700 rounded-lg shadow-xl py-1 min-w-[160px]"
+          style={{ top: menuPos.top, right: menuPos.right }}
+        >
+          <button
+            type="button"
+            onClick={() => startRename(menuSession)}
+            className="w-full text-left px-3 py-2 text-xs hover:bg-gray-700 text-gray-200 flex items-center gap-2"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+            重命名
+          </button>
+          {confirmDel ? (
+            <div className="px-3 py-2">
+              <p className="text-xs text-gray-400 mb-2">确认删除此会话？</p>
+              <div className="flex gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => { closeMenu(); onDelete(menuSession.id); }}
+                  className="flex-1 py-1 bg-red-600 hover:bg-red-500 rounded text-xs text-white"
+                >删除</button>
+                <button
+                  type="button"
+                  onClick={() => setConfirmDel(false)}
+                  className="flex-1 py-1 bg-gray-700 hover:bg-gray-600 rounded text-xs text-gray-300"
+                >取消</button>
+              </div>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setConfirmDel(true)}
+              className="w-full text-left px-3 py-2 text-xs hover:bg-gray-700 text-red-400 flex items-center gap-2"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+              删除会话
+            </button>
+          )}
+        </div>
+      )}
+
       {showAll && (
         <AllSessionsDrawer
           sessions={sessions}
@@ -101,13 +160,8 @@ export default function SessionTabs({ sessions, activeId, onSelect, onDelete, on
           dotColor={dotColor}
           onClose={() => setShowAll(false)}
           onSelect={(id) => { onSelect(id); setShowAll(false); }}
-          onRename={(s) => {
-            const next = prompt('Rename session:', s.title);
-            if (next && next.trim() && next !== s.title) onRename(s.id, next.trim());
-          }}
-          onDelete={(s) => {
-            if (confirm(`Delete "${s.title}"?\n\nThis cannot be undone.`)) onDelete(s.id);
-          }}
+          onRename={(s) => startRename(s)}
+          onDelete={(s) => onDelete(s.id)}
         />
       )}
     </>
@@ -136,11 +190,7 @@ function AllSessionsDrawer({ sessions, activeId, dotColor, onClose, onSelect, on
 
   const deleteSelected = () => {
     if (!selected.size) return;
-    if (!confirm(`Delete ${selected.size} session(s)?\n\nThis cannot be undone.`)) return;
-    for (const id of selected) {
-      const s = sessions.find((x) => x.id === id);
-      if (s) onDelete(s);
-    }
+    for (const id of selected) onDelete(id);
     setSelected(new Set());
     setBulk(false);
   };
