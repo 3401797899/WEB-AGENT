@@ -279,13 +279,28 @@ async function startCatchUpPoll(session) {
             const rc = ri.runCommand || ri.run_command || {};
             const cmdLine = rc.proposedCommandLine || rc.proposed_command_line
                          || rc.commandLine || rc.command_line || rc.command || '';
-            broadcast(session.id, {
-              type: 'command_approval_needed',
-              sessionId: session.id,
-              interactionId: String(intId),
-              commandLine: cmdLine,
-              cascadeId,
-            });
+            // Hard intercept: auto-reject commands that are too long
+            const CMD_MAX_LEN = 500;
+            if (cmdLine.length > CMD_MAX_LEN) {
+              console.log(`[windsurf][catchup] auto-rejecting command (${cmdLine.length} chars): ${cmdLine.slice(0, 80)}...`);
+              windsurf.cancelCascadeSteps(run.serverInfo, cascadeId, [absIdx])
+                .then(() => {
+                  broadcast(session.id, { type: 'command_done', sessionId: session.id });
+                  const hint = `上一条命令被自动拒绝：命令行长度 ${cmdLine.length} 字符，超过终端安全限制（${CMD_MAX_LEN}）。请将代码写入临时文件再执行。继续完成任务。`;
+                  windsurf.sendMessage(run.serverInfo, cascadeId, hint, session.modelUid || 'claude-sonnet-4-6-thinking').catch(() => {});
+                })
+                .catch(() => {
+                  broadcast(session.id, { type: 'command_approval_needed', sessionId: session.id, interactionId: String(intId), commandLine: cmdLine, cascadeId });
+                });
+            } else {
+              broadcast(session.id, {
+                type: 'command_approval_needed',
+                sessionId: session.id,
+                interactionId: String(intId),
+                commandLine: cmdLine,
+                cascadeId,
+              });
+            }
           }
         }
 
@@ -463,13 +478,39 @@ async function runWindsurfTurn(session, userMessage, ws) {
               const cmdLine = rc.proposedCommandLine || rc.proposed_command_line
                            || rc.commandLine || rc.command_line
                            || rc.command || '';
-              broadcast(session.id, {
-                type: 'command_approval_needed',
-                sessionId: session.id,
-                interactionId: String(intId),
-                commandLine: cmdLine,
-                cascadeId,
-              });
+              // Hard intercept: auto-reject commands that are too long (will be truncated by terminal)
+              const CMD_MAX_LEN = 500;
+              if (cmdLine.length > CMD_MAX_LEN) {
+                console.log(`[windsurf] auto-rejecting command (${cmdLine.length} chars > ${CMD_MAX_LEN}): ${cmdLine.slice(0, 80)}...`);
+                windsurf.cancelCascadeSteps(run.serverInfo, cascadeId, [absIdx])
+                  .then(() => {
+                    broadcast(session.id, { type: 'command_done', sessionId: session.id });
+                    // Tell Cascade to rewrite using temp file
+                    const hint = `上一条命令被自动拒绝：命令行长度 ${cmdLine.length} 字符，超过终端安全限制（${CMD_MAX_LEN}）。请将代码写入临时文件（如 /tmp/script.js）再执行，不要使用 node -e / python -c 传递超长inline代码。继续完成任务。`;
+                    windsurf.sendMessage(run.serverInfo, cascadeId, hint, session.modelUid || 'claude-sonnet-4-6-thinking')
+                      .then(() => console.log(`[windsurf] sent rewrite hint after auto-reject`))
+                      .catch((e2) => console.warn(`[windsurf] failed to send rewrite hint: ${e2.message}`));
+                  })
+                  .catch((e) => {
+                    console.warn(`[windsurf] auto-reject cancel failed: ${e.message}`);
+                    // Fall through — still show approval banner so user can manually handle
+                    broadcast(session.id, {
+                      type: 'command_approval_needed',
+                      sessionId: session.id,
+                      interactionId: String(intId),
+                      commandLine: cmdLine,
+                      cascadeId,
+                    });
+                  });
+              } else {
+                broadcast(session.id, {
+                  type: 'command_approval_needed',
+                  sessionId: session.id,
+                  interactionId: String(intId),
+                  commandLine: cmdLine,
+                  cascadeId,
+                });
+              }
               // No auto-approve attempt — keep banner until user acts or step resolves
             }
           }
