@@ -1,9 +1,12 @@
-import { useEffect, useRef, useMemo } from 'react';
+import { useEffect, useRef, useMemo, useState, memo } from 'react';
 import MessageBubble from './MessageBubble';
 import StreamingTurn from './StreamingTurn';
 
+const PAGE = 50; // messages rendered per page
+
 export default function ChatView({ session, streamingEvents, turnRunning, onLoadHistory, loadingHistory }) {
   const scrollRef = useRef(null);
+  const [showAll, setShowAll] = useState(false);
 
   const messages = session.messages || [];
 
@@ -13,6 +16,12 @@ export default function ChatView({ session, streamingEvents, turnRunning, onLoad
     if (!el) return;
     el.scrollTop = el.scrollHeight;
   }, [messages.length, streamingEvents.length, turnRunning]);
+
+  // Reset showAll when session changes
+  useEffect(() => { setShowAll(false); }, [session.id]);
+
+  const visibleMessages = showAll ? messages : messages.slice(-PAGE);
+  const hiddenCount = messages.length - visibleMessages.length;
 
   const empty = messages.length === 0 && streamingEvents.length === 0 && !turnRunning;
 
@@ -66,8 +75,18 @@ export default function ChatView({ session, streamingEvents, turnRunning, onLoad
           </div>
         )}
 
-        {messages.map((m, i) => (
-          <MessageBubble key={i} message={m} />
+        {hiddenCount > 0 && (
+          <div className="text-center">
+            <button
+              onClick={() => setShowAll(true)}
+              className="text-xs text-gray-500 hover:text-gray-300 px-3 py-1 rounded-full border border-gray-700 hover:border-gray-500 transition-colors"
+            >
+              ↑ 显示更早的 {hiddenCount} 条消息
+            </button>
+          </div>
+        )}
+        {visibleMessages.map((m) => (
+          <MessageBubble key={m.timestamp || m.id || Math.random()} message={m} />
         ))}
 
         {turnRunning && (

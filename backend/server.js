@@ -82,7 +82,9 @@ function runCodexTurn(session, userMessage, ws) {
   }
 
   // Build args for codex exec.
-  // `--cd` is only valid at the parent `exec` level (not after `resume`).
+  // `--cd` / `--sandbox` are only valid at the parent `exec` level.
+  // Model overrides for resumed conversations must be passed to `resume`,
+  // otherwise Codex keeps using the model from the existing thread.
   // We pass `-` so prompt is read from stdin (avoids quoting issues with long messages).
   const modelArgs = session.modelUid ? ['--model', session.modelUid] : [];
   const effortArgs = session.reasoningEffort ? ['-c', `reasoning_effort="${session.reasoningEffort}"`] : [];
@@ -90,10 +92,12 @@ function runCodexTurn(session, userMessage, ws) {
   const sandboxArgs = ['-s', 'workspace-write'];
   let baseArgs;
   if (session.threadId) {
-    baseArgs = ['exec', ...modelArgs, ...effortArgs, ...sandboxArgs, '--cd', session.cwd, 'resume', session.threadId,
-                '--json', '--skip-git-repo-check', '-'];
+    baseArgs = ['exec', ...sandboxArgs, '--cd', session.cwd, 'resume',
+                ...modelArgs, ...effortArgs, '--json', '--skip-git-repo-check',
+                session.threadId, '-'];
   } else {
-    baseArgs = ['exec', ...modelArgs, ...effortArgs, ...sandboxArgs, '--json', '--skip-git-repo-check', '--cd', session.cwd, '-'];
+    baseArgs = ['exec', ...modelArgs, ...effortArgs, ...sandboxArgs,
+                '--json', '--skip-git-repo-check', '--cd', session.cwd, '-'];
   }
 
   const { cmd, prefixArgs } = resolveExecutable(config.command);
@@ -204,6 +208,10 @@ function runCodexTurn(session, userMessage, ws) {
   });
 }
 
+// Sessions confirmed idle recently: sessionId → timestamp. Skip re-checking within 30s.
+const recentlyIdle = new Map();
+const IDLE_CACHE_TTL = 30_000;
+
 // ─── Catch-up poll for externally-running Windsurf cascades ──────────────
 // Called when load_session finds a Windsurf session with threadId but no active run.
 // Checks if the cascade is still RUNNING and, if so, starts a live polling loop.
@@ -216,9 +224,17 @@ async function startCatchUpPoll(session) {
       servers[0];
 
     const cascadeId = session.threadId;
+
+    // Skip if we recently confirmed this session was idle
+    const lastIdle = recentlyIdle.get(session.id);
+    if (lastIdle && Date.now() - lastIdle < IDLE_CACHE_TTL) return;
+
     const status = await windsurf.getTrajectoryStatus(server, cascadeId);
     const isRunning = String(status?.status || '').includes('RUNNING');
-    if (!isRunning) return;
+    if (!isRunning) {
+      recentlyIdle.set(session.id, Date.now());
+      return;
+    }
 
     // Claim the run slot
     const run = activeRuns.get(session.id);
@@ -252,6 +268,26 @@ async function startCatchUpPoll(session) {
         const st = steps[si];
         const absIdx = nextFetchFrom + si;
         highWaterMark = Math.max(highWaterMark, absIdx + 1);
+
+        // Handle requestedInteraction (same as in runWindsurfTurn)
+        if (st.requestedInteraction && st.status !== 'CORTEX_STEP_STATUS_DONE') {
+          const ri = st.requestedInteraction;
+          const intId = ri?.interactionId || ri?.id || absIdx;
+          if (!seenDoneIdx.has(`approve:${intId}`)) {
+            seenDoneIdx.add(`approve:${intId}`);
+            run.pendingInteraction = ri;
+            const rc = ri.runCommand || ri.run_command || {};
+            const cmdLine = rc.proposedCommandLine || rc.proposed_command_line
+                         || rc.commandLine || rc.command_line || rc.command || '';
+            broadcast(session.id, {
+              type: 'command_approval_needed',
+              sessionId: session.id,
+              interactionId: String(intId),
+              commandLine: cmdLine,
+              cascadeId,
+            });
+          }
+        }
 
         const ev = windsurf.translateStep(st);
         if (!ev) {
@@ -296,6 +332,7 @@ async function startCatchUpPoll(session) {
     }
 
     broadcast(session.id, { type: 'turn_done', sessionId: session.id, exitCode: 0 });
+    recentlyIdle.set(session.id, Date.now());
   } catch (e) {
     console.error('[catch-up poll] error:', e.message);
   } finally {
@@ -329,10 +366,6 @@ async function runWindsurfTurn(session, userMessage, ws) {
   run.serverInfo = server;
   activeRuns.set(session.id, run);
 
-  // Persist user message
-  store.appendMessage(session.id, { role: 'user', content: userMessage });
-  broadcastAll({ type: 'session_updated', session: store.get(session.id) });
-
   let cascadeId = session.threadId;
   try {
     if (!cascadeId) {
@@ -344,10 +377,33 @@ async function runWindsurfTurn(session, userMessage, ws) {
 
     // Determine step offset to start polling from (so resumed sessions don't re-replay)
     const initialStatus = await windsurf.getTrajectoryStatus(server, cascadeId);
+
+    // If cascade is already running (e.g. backend restarted mid-turn), reattach instead of sending
+    if (String(initialStatus.status || '').includes('RUNNING')) {
+      console.log(`[windsurf] cascade already RUNNING — reattaching catch-up poll`);
+      broadcast(session.id, { type: 'turn_running', sessionId: session.id });
+      ws.send(JSON.stringify({ type: 'error', message: 'Cascade is already running — reconnecting to existing turn.' }));
+      // Delegate to the catch-up poller which handles in-progress cascades
+      startCatchUpPoll(session).catch(() => {});
+      return;
+    }
+
     const messageStartOffset = initialStatus.numTotalSteps || 0;
 
+    // Persist user message only after confirming cascade is idle and we can send
+    store.appendMessage(session.id, { role: 'user', content: userMessage });
+    broadcastAll({ type: 'session_updated', session: store.get(session.id) });
+
     const modelUid = session.modelUid || 'claude-sonnet-4-6-thinking';
-    await windsurf.sendMessage(server, cascadeId, userMessage, modelUid);
+    // If session.cwd differs from the server's workspace, prepend the target
+    // directory so Cascade knows where to work (no API-level cwd override exists)
+    let messageToSend = userMessage;
+    const serverWorkspace = server.workspacePath || '';
+    if (session.cwd && session.cwd !== serverWorkspace) {
+      messageToSend = `[工作目录: ${session.cwd}]\n\n${userMessage}`;
+      console.log(`[windsurf] injecting cwd context: ${session.cwd}`);
+    }
+    await windsurf.sendMessage(server, cascadeId, messageToSend, modelUid);
 
     broadcast(session.id, { type: 'event', sessionId: session.id, event: { type: 'cascade.started', cascadeId } });
 
@@ -361,11 +417,13 @@ async function runWindsurfTurn(session, userMessage, ws) {
     const seenDoneIdx = new Set();
     let nextFetchFrom = messageStartOffset; // re-fetch from here each poll
     let highWaterMark = messageStartOffset;
-    const pollInterval = 700;
-    const maxIterations = 600; // ~7 minutes
+    const maxIterations = 1800; // ~6 minutes at 200ms
+    // cmdOutputLen: stepIndex → bytes already broadcast (for incremental streaming)
+    const cmdOutputLen = {};
+    let hasRunningCmd = false; // whether a command step is actively executing
     for (let i = 0; i < maxIterations; i++) {
       if (run.cancelled) break;
-      await new Promise((r) => setTimeout(r, pollInterval));
+      await new Promise((r) => setTimeout(r, hasRunningCmd ? 200 : 700));
 
       let steps;
       try {
@@ -380,6 +438,31 @@ async function runWindsurfTurn(session, userMessage, ws) {
           const st = steps[si];
           const absIdx = nextFetchFrom + si;
           highWaterMark = Math.max(highWaterMark, absIdx + 1);
+
+          // Handle requestedInteraction (e.g. command needs manual approval in IDE)
+          if (st.requestedInteraction && st.status !== 'CORTEX_STEP_STATUS_DONE') {
+            const ri = st.requestedInteraction;
+            const intId = ri?.interactionId || ri?.id || absIdx;
+            if (!seenDoneIdx.has(`approve:${intId}`)) {
+              seenDoneIdx.add(`approve:${intId}`);
+              console.log(`[windsurf] requestedInteraction at step ${absIdx}:`, JSON.stringify(ri).slice(0, 300));
+              // Store the real interaction object on the run for use by approve_command handler
+              run.pendingInteraction = ri;
+              // Extract command line from the runCommand field inside the interaction
+              const rc = ri.runCommand || ri.run_command || {};
+              const cmdLine = rc.proposedCommandLine || rc.proposed_command_line
+                           || rc.commandLine || rc.command_line
+                           || rc.command || '';
+              broadcast(session.id, {
+                type: 'command_approval_needed',
+                sessionId: session.id,
+                interactionId: String(intId),
+                commandLine: cmdLine,
+                cascadeId,
+              });
+              // No auto-approve attempt — keep banner until user acts or step resolves
+            }
+          }
 
           const ev = windsurf.translateStep(st);
           if (!ev) {
@@ -399,6 +482,23 @@ async function runWindsurfTurn(session, userMessage, ws) {
               event: { type: 'cascade.step', step: ev },
             });
           } else {
+            // Stream partial output for running runCommand steps
+            if (ev.tool === 'run_command' && st.status !== 'CORTEX_STEP_STATUS_DONE') {
+              const rawPayload = st.runCommand || st.run_command || {};
+              const full = rawPayload.combinedOutput?.full || rawPayload.output || '';
+              const known = cmdOutputLen[absIdx] || 0;
+              if (full.length > known) {
+                cmdOutputLen[absIdx] = full.length;
+                broadcast(session.id, {
+                  type: 'command_output',
+                  sessionId: session.id,
+                  stepIndex: absIdx,
+                  delta: full.slice(known),
+                  full,
+                });
+              }
+              hasRunningCmd = true;
+            }
             // Tool items: only commit once DONE so we don't dup
             if (st.status === 'CORTEX_STEP_STATUS_DONE' && !seenDoneIdx.has(absIdx)) {
               items.push({ type: ev.tool || ev.kind, summary: ev.summary, details: ev.details });
@@ -411,9 +511,31 @@ async function runWindsurfTurn(session, userMessage, ws) {
           }
 
           if (st.status === 'CORTEX_STEP_STATUS_DONE') {
+            // If this step had a requestedInteraction, it's now resolved — clear banner
+            if (st.requestedInteraction && !seenDoneIdx.has(absIdx)) {
+              broadcast(session.id, { type: 'command_approved', sessionId: session.id });
+            }
+            // Clear any running command panel if this was it
+            if (run.runningStepIdx === absIdx) {
+              run.runningStepIdx = null;
+              hasRunningCmd = false;
+              broadcast(session.id, { type: 'command_done', sessionId: session.id });
+            }
             seenDoneIdx.add(absIdx);
           } else if (firstStillRunning < 0) {
             firstStillRunning = absIdx;
+            // Broadcast running command info so frontend can show cancel/input panel
+            if (!st.requestedInteraction && ev.kind === 'tool' && run.runningStepIdx !== absIdx) {
+              run.runningStepIdx = absIdx;
+              const cmdLine = ev.summary || ev.details?.commandLine || ev.details?.command || '';
+              broadcast(session.id, {
+                type: 'command_running',
+                sessionId: session.id,
+                stepIndex: absIdx,
+                commandLine: cmdLine,
+                cascadeId,
+              });
+            }
           }
         }
         // Next poll re-reads from the first still-running step (if any)
@@ -546,6 +668,79 @@ wss.on('connection', (ws) => {
           break;
         }
 
+        case 'approve_command': {
+          const run = activeRuns.get(msg.sessionId);
+          if (run?.cascadeId && run?.serverInfo) {
+            // Use the real requestedInteraction stored during polling; fall back to ResolveOutstandingSteps
+            const interaction = run.pendingInteraction || null;
+            const cid = msg.cascadeId || run.cascadeId;
+            console.log('[windsurf] approve_command pendingInteraction:', JSON.stringify(interaction)?.slice(0, 200));
+            windsurf.approveInteraction(run.serverInfo, cid, interaction)
+              .then(() => {
+                run.pendingInteraction = null;
+                broadcast(msg.sessionId, { type: 'command_approved', sessionId: msg.sessionId });
+              })
+              .catch((e) => {
+                run.cancelled = true;
+                broadcast(msg.sessionId, { type: 'approve_failed', sessionId: msg.sessionId, message: e.message });
+              });
+          }
+          break;
+        }
+
+        case 'cancel_step': {
+          // Cancel a specific running step (e.g. a stuck interactive command)
+          const run = activeRuns.get(msg.sessionId);
+          if (run?.cascadeId && run?.serverInfo) {
+            const stepIdx = msg.stepIndex ?? run.runningStepIdx;
+            if (stepIdx != null) {
+              run.runningStepIdx = null; // reset so polling picks up next step
+              windsurf.cancelCascadeSteps(run.serverInfo, run.cascadeId, [stepIdx])
+                .then(() => {
+                  broadcast(msg.sessionId, { type: 'command_done', sessionId: msg.sessionId });
+                  console.log(`[windsurf] cancelled step ${stepIdx} for ${msg.sessionId.slice(0, 8)}`);
+                })
+                .catch(async (e) => {
+                  // Fallback: try ResolveOutstandingSteps
+                  console.warn(`[windsurf] CancelCascadeSteps failed (${e.message}), trying ResolveOutstandingSteps`);
+                  try {
+                    await windsurf.resolveOutstandingSteps(run.serverInfo, run.cascadeId);
+                    broadcast(msg.sessionId, { type: 'command_done', sessionId: msg.sessionId });
+                  } catch (e2) {
+                    broadcast(msg.sessionId, { type: 'error', message: `Cancel step failed: ${e2.message}` });
+                  }
+                });
+            }
+          }
+          break;
+        }
+
+        case 'send_step_input': {
+          // Send text input to a step waiting for stdin (e.g. git commit message via askUserQuestion)
+          const run = activeRuns.get(msg.sessionId);
+          if (run?.cascadeId && run?.serverInfo && msg.text) {
+            const ri = run.pendingInteraction;
+            const cid = msg.cascadeId || run.cascadeId;
+            // Try as askUserQuestion response first, then resolveOutstandingSteps
+            const interaction = ri || {};
+            const body = {
+              cascadeId: cid,
+              interaction: {
+                trajectoryId: interaction.trajectoryId || interaction.trajectory_id || cid,
+                stepIndex: interaction.stepIndex ?? interaction.step_index ?? (run.runningStepIdx ?? 0),
+                askUserQuestion: { response: msg.text },
+              },
+            };
+            windsurf.rpcDirect(run.serverInfo, 'HandleCascadeUserInteraction', body)
+              .then(() => {
+                run.pendingInteraction = null;
+                broadcast(msg.sessionId, { type: 'command_approved', sessionId: msg.sessionId });
+              })
+              .catch((e) => broadcast(msg.sessionId, { type: 'error', message: `Send input failed: ${e.message}` }));
+          }
+          break;
+        }
+
         case 'cancel_turn': {
           const run = activeRuns.get(msg.sessionId);
           if (run?.proc) {
@@ -672,6 +867,7 @@ wss.on('connection', (ws) => {
               path: dirPath,
               parent: parent !== dirPath ? parent : null,
               entries,
+              _for: msg._for || null,
             }));
           } catch (e) {
             ws.send(JSON.stringify({ type: 'dir_error', message: e.message }));

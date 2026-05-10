@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
@@ -5,13 +6,13 @@ import 'highlight.js/styles/github-dark.css';
 import CodeBlock from './CodeBlock';
 import ToolItem from './ToolItem';
 
-export default function MessageBubble({ message }) {
+const MessageBubble = memo(function MessageBubble({ message }) {
   const isUser = message.role === 'user';
 
   return (
     <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
       <div
-        className={`rounded-2xl px-4 py-2.5 max-w-[88%] sm:max-w-[80%] text-sm leading-relaxed shadow-sm ${
+        className={`rounded-2xl px-4 py-2.5 max-w-[88%] sm:max-w-[80%] text-sm leading-relaxed shadow-sm overflow-x-auto ${
           isUser
             ? 'bg-emerald-600 text-white rounded-br-md'
             : 'bg-gray-800 text-gray-100 rounded-bl-md'
@@ -57,4 +58,6 @@ export default function MessageBubble({ message }) {
       </div>
     </div>
   );
-}
+});
+
+export default MessageBubble;

@@ -75,7 +75,7 @@ export default function StreamingTurn({ events, turnRunning }) {
 
   return (
     <div className="flex justify-start">
-      <div className="bg-gray-800 text-gray-100 rounded-2xl rounded-bl-md px-4 py-2.5 max-w-[88%] sm:max-w-[80%] text-sm shadow-sm">
+      <div className="bg-gray-800 text-gray-100 rounded-2xl rounded-bl-md px-4 py-2.5 max-w-[88%] sm:max-w-[80%] text-sm shadow-sm overflow-x-auto">
         {timeline.map((entry, i) =>
           entry.kind === 'tool' ? (
             <ToolItem key={i} item={entry.item} />

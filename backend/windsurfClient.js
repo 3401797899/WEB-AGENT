@@ -301,6 +301,82 @@ async function cancelCascade(server, cascadeId) {
   return rpc(server, 'CancelCascadeInvocation', { cascadeId });
 }
 
+async function cancelCascadeSteps(server, cascadeId, stepIndices) {
+  return rpc(server, 'CancelCascadeSteps', { cascadeId, stepIndices });
+}
+
+// Direct RPC call without any metadata wrapping
+async function rpcDirect(server, method, body) {
+  return rpc(server, method, body);
+}
+
+// Approve a requestedInteraction using the correct HandleCascadeUserInteraction RPC.
+// The `interaction` arg is the requestedInteraction object from a trajectory step.
+// It is a CascadeUserInteraction proto that carries trajectoryId, stepIndex, and one
+// of the interaction oneof fields (runCommand, deploy, etc.).
+async function approveInteraction(server, cascadeId, interaction) {
+  // Build the approved interaction response.
+  // We mirror the incoming requestedInteraction but flip confirm=true for runCommand,
+  // or accept=true for deploy, etc.
+  const ri = interaction || {};
+
+  // Determine which oneof variant is present
+  const runCommand = ri.runCommand || ri.run_command;
+  const deploy     = ri.deploy;
+  const resolveTask = ri.resolveTask || ri.resolve_task;
+  const upsertCodemap = ri.upsertCodemap || ri.upsert_codemap;
+  const readUrlContent = ri.readUrlContent || ri.read_url_content;
+
+  let interactionPayload;
+  if (runCommand) {
+    const cmd = runCommand.proposedCommandLine || runCommand.proposed_command_line
+             || runCommand.commandLine || runCommand.command_line || '';
+    interactionPayload = {
+      runCommand: {
+        confirm: true,
+        proposedCommandLine: cmd,
+        submittedCommandLine: cmd,
+      },
+    };
+  } else if (deploy) {
+    interactionPayload = { deploy: { ...deploy, confirm: true } };
+  } else if (resolveTask) {
+    interactionPayload = { resolveTask: { ...resolveTask, confirm: true } };
+  } else if (upsertCodemap) {
+    interactionPayload = { upsertCodemap: { ...upsertCodemap, confirm: true } };
+  } else if (readUrlContent) {
+    interactionPayload = { readUrlContent: { ...readUrlContent, action: 'ALLOW' } };
+  } else {
+    // Unknown interaction type — try ResolveOutstandingSteps as fallback
+    console.warn('[windsurf] unknown interaction type, trying ResolveOutstandingSteps');
+    return rpc(server, 'ResolveOutstandingSteps', { cascadeId });
+  }
+
+  const body = {
+    cascadeId,
+    interaction: {
+      trajectoryId: ri.trajectoryId || ri.trajectory_id || cascadeId,
+      stepIndex: ri.stepIndex ?? ri.step_index ?? 0,
+      ...interactionPayload,
+    },
+  };
+
+  try {
+    await rpc(server, 'HandleCascadeUserInteraction', body);
+    console.log('[windsurf] approved via HandleCascadeUserInteraction');
+    return;
+  } catch (e) {
+    // Fallback: ResolveOutstandingSteps only needs cascadeId
+    console.warn(`[windsurf] HandleCascadeUserInteraction failed (${e.message}), trying ResolveOutstandingSteps`);
+    return rpc(server, 'ResolveOutstandingSteps', { cascadeId });
+  }
+}
+
+// Resolve all outstanding steps at once (bulk approve / skip).
+async function resolveOutstandingSteps(server, cascadeId) {
+  return rpc(server, 'ResolveOutstandingSteps', { cascadeId });
+}
+
 async function deleteCascade(server, cascadeId) {
   return rpc(server, 'DeleteCascadeTrajectory', { cascadeId });
 }
@@ -456,6 +532,10 @@ module.exports = {
   getTrajectorySteps,
   getTrajectoryStatus,
   cancelCascade,
+  cancelCascadeSteps,
+  rpcDirect,
+  approveInteraction,
+  resolveOutstandingSteps,
   deleteCascade,
   translateStep,
 };

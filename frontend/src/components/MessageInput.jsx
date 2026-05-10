@@ -20,12 +20,18 @@ const EFFORT_LEVELS = [
   { value: 'extra_high', label: '极高' },
 ];
 
-export default function MessageInput({ onSend, onCancel, turnRunning, provider, modelUid, onModelChange, reasoningEffort, onReasoningEffortChange, windsurfQuota, onRefreshQuota }) {
+export default function MessageInput({ onSend, onCancel, turnRunning, provider, modelUid, onModelChange, reasoningEffort, onReasoningEffortChange, windsurfQuota, onRefreshQuota, pendingApproval, onApprove, onReject, runningStep, onCancelStep, onSendStepInput, commandOutput, commandStuck, onCancelTurn, onCancelStepAndHint }) {
   const [value, setValue] = useState('');
+  const [stepInput, setStepInput] = useState('');
   const [listening, setListening] = useState(false);
   const [showTemplates, setShowTemplates] = useState(false);
   const textareaRef = useRef(null);
   const recognitionRef = useRef(null);
+  const outputRef = useRef(null);
+
+  useEffect(() => {
+    if (outputRef.current) outputRef.current.scrollTop = outputRef.current.scrollHeight;
+  }, [commandOutput]);
 
   const submit = () => {
     const text = value.trim();
@@ -176,69 +182,177 @@ export default function MessageInput({ onSend, onCancel, turnRunning, provider, 
       )}
 
       <div className="px-3 pt-2 pb-safe pb-2.5">
-        <div className="flex gap-2 items-end">
-          <button
-            onClick={() => setShowTemplates((v) => !v)}
-            className="w-10 h-10 shrink-0 flex items-center justify-center text-gray-400 hover:text-white bg-gray-800 hover:bg-gray-700 rounded-xl transition-colors"
-            title="Prompt templates"
-          >
-            ✨
-          </button>
-
-          <textarea
-            ref={textareaRef}
-            value={value}
-            onChange={handleChange}
-            onKeyDown={handleKeyDown}
-            placeholder={turnRunning ? 'Codex is working…' : 'Send a message…'}
-            disabled={turnRunning}
-            rows={1}
-            className="flex-1 bg-gray-800 text-white text-sm rounded-xl px-3.5 py-2.5 resize-none outline-none focus:ring-1 focus:ring-emerald-500 placeholder-gray-600 disabled:opacity-50"
-            style={{ minHeight: '40px', maxHeight: '160px' }}
-            autoComplete="off"
-            autoCorrect="off"
-            autoCapitalize="sentences"
-            spellCheck={false}
-          />
-
-          {SpeechRec && !turnRunning && (
+        {runningStep && !pendingApproval ? (
+          <div className="flex flex-col gap-2">
+            {/* Stuck warning banner */}
+            {commandStuck && (
+              <div className="flex items-center gap-2 bg-red-950/60 border border-red-600/50 rounded-xl px-3 py-2.5 animate-pulse">
+                <span className="text-red-400 text-lg shrink-0">⚠️</span>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm text-red-300 font-semibold">命令可能已卡住</p>
+                  <p className="text-[11px] text-red-400/70">超过 15 秒无输出，终端可能在等待输入或命令不完整</p>
+                </div>
+              </div>
+            )}
+            {/* Command info */}
+            <div className={`flex flex-col gap-1 rounded-xl overflow-hidden ${commandStuck ? 'bg-red-950/30 border border-red-700/30' : 'bg-blue-950/50 border border-blue-700/40'}`}>
+              <div className="flex items-center gap-2 px-3 py-2">
+                <span className={`shrink-0 ${commandStuck ? 'text-red-400' : 'text-blue-400'}`}>{commandStuck ? '🔴' : '⚙️'}</span>
+                <div className="flex-1 min-w-0">
+                  <p className={`text-xs font-medium ${commandStuck ? 'text-red-300' : 'text-blue-300'}`}>
+                    {commandStuck ? '命令无响应' : '命令执行中'}
+                  </p>
+                  <code className="text-[11px] text-gray-400 font-mono break-all">{runningStep.commandLine || '(running…)'}</code>
+                </div>
+              </div>
+              {commandOutput ? (
+                <pre ref={outputRef} className="px-3 pb-2 text-[11px] font-mono text-green-300/80 max-h-32 overflow-y-auto whitespace-pre-wrap break-all border-t border-gray-800/40">{commandOutput}</pre>
+              ) : null}
+            </div>
+            {/* Action buttons - prominent when stuck */}
+            {commandStuck ? (
+              <div className="flex flex-col gap-2">
+                <button
+                  onClick={() => onCancelStepAndHint?.(
+                    `上一条命令在终端中打开了交互式程序（如 vim/less/nano 等编辑器），导致卡住无法返回。请改用非交互方式重新执行，例如：\n- git 操作加 --no-edit 参数\n- 避免打开 vim/nano，改用 echo 或 sed 写入\n- 使用 EDITOR=true 或 GIT_EDITOR=true 环境变量\n请继续完成之前的任务。`
+                  )}
+                  className="w-full py-3 bg-orange-600 hover:bg-orange-500 active:scale-[0.98] text-white text-sm font-bold rounded-xl transition-all"
+                >
+                  🔄 终止并提示 AI 避开交互
+                </button>
+                <button
+                  onClick={onCancelStep}
+                  className="w-full py-2.5 bg-red-600 hover:bg-red-500 active:scale-[0.98] text-white text-sm font-medium rounded-xl transition-all"
+                >
+                  ⏹ 仅终止此命令（AI 继续）
+                </button>
+                <button
+                  onClick={onCancelTurn}
+                  className="w-full py-2 bg-gray-700 hover:bg-gray-600 active:scale-[0.98] text-gray-300 text-xs font-medium rounded-xl transition-all"
+                >
+                  取消整个任务
+                </button>
+              </div>
+            ) : (
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={stepInput}
+                  onChange={(e) => setStepInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && stepInput.trim()) {
+                      onSendStepInput?.(stepInput.trim());
+                      setStepInput('');
+                    }
+                  }}
+                  placeholder="发送输入（如提交消息、:wq 等）"
+                  className="flex-1 bg-gray-800 text-white text-sm rounded-xl px-3 py-2 outline-none focus:ring-1 focus:ring-blue-500 placeholder-gray-600"
+                />
+                <button
+                  onClick={() => { if (stepInput.trim()) { onSendStepInput?.(stepInput.trim()); setStepInput(''); } }}
+                  disabled={!stepInput.trim()}
+                  className="px-3 py-2 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 disabled:text-gray-500 text-white text-sm font-medium rounded-xl transition-colors"
+                >
+                  发送
+                </button>
+                <button
+                  onClick={onCancelStep}
+                  className="px-3 py-2 bg-red-700 hover:bg-red-600 text-white text-sm font-medium rounded-xl transition-colors"
+                >
+                  终止
+                </button>
+              </div>
+            )}
+          </div>
+        ) : pendingApproval ? (
+          <div className="flex flex-col gap-2">
+            <div className="flex items-start gap-2 bg-amber-950/50 border border-amber-700/40 rounded-xl px-3 py-2">
+              <span className="text-amber-400 shrink-0 mt-0.5">⚠️</span>
+              <div className="flex-1 min-w-0">
+                <p className="text-xs text-amber-300 font-medium">命令需要批准才能运行</p>
+                <code className="text-[11px] text-amber-200/70 font-mono break-all">{pendingApproval.commandLine || '(unknown command)'}</code>
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={onApprove}
+                className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 active:scale-95 text-white text-sm font-medium rounded-xl transition-all"
+              >
+                ✓ 允许运行
+              </button>
+              <button
+                onClick={onReject}
+                className="flex-1 py-2.5 bg-gray-700 hover:bg-gray-600 active:scale-95 text-white text-sm font-medium rounded-xl transition-all"
+              >
+                ✕ 取消任务
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex gap-2 items-end">
             <button
-              onClick={toggleVoice}
-              className={`w-10 h-10 shrink-0 flex items-center justify-center rounded-xl transition-colors ${
-                listening
-                  ? 'bg-red-500 text-white animate-pulse'
-                  : 'bg-gray-800 text-gray-400 hover:text-white hover:bg-gray-700'
-              }`}
-              title="Voice input"
+              onClick={() => setShowTemplates((v) => !v)}
+              className="w-10 h-10 shrink-0 flex items-center justify-center text-gray-400 hover:text-white bg-gray-800 hover:bg-gray-700 rounded-xl transition-colors"
+              title="Prompt templates"
             >
-              🎤
+              ✨
             </button>
-          )}
 
-          {turnRunning ? (
-            <button
-              onClick={onCancel}
-              className="w-10 h-10 shrink-0 flex items-center justify-center bg-red-500 hover:bg-red-400 text-white rounded-xl transition-colors"
-              title="Stop"
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-                <rect x="6" y="6" width="12" height="12" rx="1" />
-              </svg>
-            </button>
-          ) : (
-            <button
-              onClick={submit}
-              disabled={!value.trim()}
-              className="w-10 h-10 shrink-0 flex items-center justify-center bg-emerald-600 hover:bg-emerald-500 disabled:bg-gray-700 disabled:text-gray-500 active:scale-95 rounded-xl transition-all"
-              title="Send"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                <path d="m22 2-7 20-4-9-9-4z" />
-                <path d="M22 2 11 13" />
-              </svg>
-            </button>
-          )}
-        </div>
+            <textarea
+              ref={textareaRef}
+              value={value}
+              onChange={handleChange}
+              onKeyDown={handleKeyDown}
+              placeholder={turnRunning ? 'Codex is working…' : 'Send a message…'}
+              disabled={turnRunning}
+              rows={1}
+              className="flex-1 bg-gray-800 text-white text-sm rounded-xl px-3.5 py-2.5 resize-none outline-none focus:ring-1 focus:ring-emerald-500 placeholder-gray-600 disabled:opacity-50"
+              style={{ minHeight: '40px', maxHeight: '160px' }}
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="sentences"
+              spellCheck={false}
+            />
+
+            {SpeechRec && !turnRunning && (
+              <button
+                onClick={toggleVoice}
+                className={`w-10 h-10 shrink-0 flex items-center justify-center rounded-xl transition-colors ${
+                  listening
+                    ? 'bg-red-500 text-white animate-pulse'
+                    : 'bg-gray-800 text-gray-400 hover:text-white hover:bg-gray-700'
+                }`}
+                title="Voice input"
+              >
+                🎤
+              </button>
+            )}
+
+            {turnRunning ? (
+              <button
+                onClick={onCancel}
+                className="w-10 h-10 shrink-0 flex items-center justify-center bg-red-500 hover:bg-red-400 text-white rounded-xl transition-colors"
+                title="Stop"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                  <rect x="6" y="6" width="12" height="12" rx="1" />
+                </svg>
+              </button>
+            ) : (
+              <button
+                onClick={submit}
+                disabled={!value.trim()}
+                className="w-10 h-10 shrink-0 flex items-center justify-center bg-emerald-600 hover:bg-emerald-500 disabled:bg-gray-700 disabled:text-gray-500 active:scale-95 rounded-xl transition-all"
+                title="Send"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="m22 2-7 20-4-9-9-4z" />
+                  <path d="M22 2 11 13" />
+                </svg>
+              </button>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

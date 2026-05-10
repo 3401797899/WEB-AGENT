@@ -27,6 +27,11 @@ export default function App() {
   const [toast, setToast] = useState(null);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [windsurfQuota, setWindsurfQuota] = useState(null);
+  const [pendingApproval, setPendingApproval] = useState(null); // { sessionId, interactionId, commandLine, cascadeId }
+  const [runningStep, setRunningStep] = useState(null); // { sessionId, stepIndex, commandLine, cascadeId }
+  const [commandOutput, setCommandOutput] = useState(''); // live stdout for running command
+  const [commandStuck, setCommandStuck] = useState(false); // true when running command appears stuck
+  const lastOutputTimeRef = useRef(0); // timestamp of last command output
   const wsRef = useRef(null);
   const activeIdRef = useRef(null);
   const activeProviderRef = useRef(null);
@@ -93,6 +98,10 @@ export default function App() {
           case 'session_data': {
             setActiveSession(msg.session);
             setStreamingEvents([]);
+            setTurnRunning(false);
+            setPendingApproval(null);
+            setRunningStep(null);
+            setCommandOutput('');
             if (msg.session.provider === 'windsurf') {
               ws.send(JSON.stringify({ type: 'get_windsurf_quota' }));
             }
@@ -145,6 +154,9 @@ export default function App() {
             if (msg.sessionId === activeIdRef.current) {
               setTurnRunning(false);
               setStreamingEvents([]);
+              setPendingApproval(null);
+              setRunningStep(null);
+              setCommandOutput('');
               // Refresh windsurf quota after each turn
               if (activeProviderRef.current === 'windsurf') {
                 ws.send(JSON.stringify({ type: 'get_windsurf_quota' }));
@@ -156,7 +168,54 @@ export default function App() {
             if (msg.sessionId === activeIdRef.current) {
               setTurnRunning(false);
               setStreamingEvents([]);
+              setPendingApproval(null);
+              setRunningStep(null);
+              setCommandOutput('');
               showToast('Turn cancelled', 'info');
+            }
+            break;
+          }
+          case 'command_approval_needed': {
+            if (msg.sessionId === activeIdRef.current) {
+              setPendingApproval({
+                sessionId: msg.sessionId,
+                interactionId: msg.interactionId,
+                commandLine: msg.commandLine,
+                cascadeId: msg.cascadeId,
+              });
+            }
+            break;
+          }
+          case 'command_approved': {
+            setPendingApproval(null);
+            break;
+          }
+          case 'command_running': {
+            if (msg.sessionId === activeIdRef.current) {
+              setCommandOutput('');
+              setCommandStuck(false);
+              lastOutputTimeRef.current = Date.now();
+              setRunningStep({ sessionId: msg.sessionId, stepIndex: msg.stepIndex, commandLine: msg.commandLine, cascadeId: msg.cascadeId });
+            }
+            break;
+          }
+          case 'command_output': {
+            if (msg.sessionId === activeIdRef.current) {
+              lastOutputTimeRef.current = Date.now();
+              setCommandStuck(false);
+              setCommandOutput((prev) => prev + (msg.delta || ''));
+            }
+            break;
+          }
+          case 'command_done': {
+            setRunningStep(null);
+            setCommandStuck(false);
+            break;
+          }
+          case 'approve_failed': {
+            if (msg.sessionId === activeIdRef.current) {
+              setPendingApproval(null);
+              showToast('无法自动批准，任务已取消。请在 Windsurf IDE 中手动操作后重试。', 'error');
             }
             break;
           }
@@ -171,7 +230,11 @@ export default function App() {
           }
           case 'error': {
             showToast(msg.message);
-            setTurnRunning(false);
+            // Don't reset turnRunning for informational errors (e.g. "cascade already running")
+            // Only reset if this is a real failure (no pending approval, no reconnect)
+            if (!msg.message?.includes('already running')) {
+              setTurnRunning(false);
+            }
             setLoadingHistory(false);
             break;
           }
@@ -184,6 +247,17 @@ export default function App() {
     connect();
     return () => { dead = true; ws?.close(); };
   }, [showToast]);
+
+  // ── Stuck command detection ──────────────────────────────────────────
+  useEffect(() => {
+    if (!runningStep) { setCommandStuck(false); return; }
+    const STUCK_THRESHOLD = 15_000; // 15 seconds without output
+    const id = setInterval(() => {
+      const idle = Date.now() - (lastOutputTimeRef.current || 0);
+      if (idle > STUCK_THRESHOLD) setCommandStuck(true);
+    }, 3_000);
+    return () => clearInterval(id);
+  }, [runningStep]);
 
   // ── Actions ────────────────────────────────────────────────────────────
   const selectSession = useCallback((id) => {
@@ -346,6 +420,45 @@ export default function App() {
           onReasoningEffortChange={(e) => updateReasoningEffort(activeSession.id, e)}
           windsurfQuota={windsurfQuota}
           onRefreshQuota={() => sendWs({ type: 'get_windsurf_quota' })}
+          pendingApproval={pendingApproval}
+          onApprove={() => {
+            sendWs({ type: 'approve_command', sessionId: pendingApproval.sessionId, interactionId: pendingApproval.interactionId, cascadeId: pendingApproval.cascadeId });
+            setPendingApproval(null);
+          }}
+          onReject={() => {
+            sendWs({ type: 'cancel_turn', sessionId: pendingApproval.sessionId });
+            setPendingApproval(null);
+          }}
+          runningStep={runningStep}
+          onCancelStep={() => {
+            sendWs({ type: 'cancel_step', sessionId: runningStep.sessionId, stepIndex: runningStep.stepIndex });
+            setRunningStep(null);
+          }}
+          onSendStepInput={(text) => {
+            sendWs({ type: 'send_step_input', sessionId: runningStep.sessionId, stepIndex: runningStep.stepIndex, cascadeId: runningStep.cascadeId, text });
+          }}
+          commandOutput={commandOutput}
+          commandStuck={commandStuck}
+          onCancelTurn={() => {
+            sendWs({ type: 'cancel_turn', sessionId: runningStep?.sessionId || activeSession?.id });
+            setRunningStep(null);
+            setCommandStuck(false);
+          }}
+          onCancelStepAndHint={(hint) => {
+            const sid = runningStep?.sessionId || activeSession?.id;
+            const stepIdx = runningStep?.stepIndex;
+            sendWs({ type: 'cancel_step', sessionId: sid, stepIndex: stepIdx });
+            setRunningStep(null);
+            setCommandStuck(false);
+            // After a short delay, send a hint message so AI retries non-interactively
+            setTimeout(() => {
+              if (hint && sid) {
+                setTurnRunning(true);
+                setStreamingEvents([]);
+                sendWs({ type: 'send_message', sessionId: sid, content: hint });
+              }
+            }, 2000);
+          }}
         />
       )}
 
