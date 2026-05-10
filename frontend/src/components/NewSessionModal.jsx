@@ -340,7 +340,7 @@ function WindsurfPicker({
                   )}
                   {workspaces.map((w) => (
                     <button
-                      key={w.pid}
+                      key={w.workspacePath || w.pid}
                       onClick={() => onPickWorkspace(w)}
                       className="w-full flex items-center gap-3 px-4 py-3 hover:bg-gray-800 text-left border-b border-gray-900"
                     >
@@ -352,6 +352,12 @@ function WindsurfPicker({
                         <p className="text-xs text-gray-500 truncate font-mono">
                           {w.workspacePath || w.workspaceId}
                         </p>
+                        {w.trajectoryCount > 0 && (
+                          <p className="text-[10px] text-gray-600">
+                            {w.trajectoryCount} 个会话
+                            {w.lastModified ? ` · ${new Date(w.lastModified).toLocaleDateString()}` : ''}
+                          </p>
+                        )}
                       </div>
                       <span className="text-gray-500">›</span>
                     </button>

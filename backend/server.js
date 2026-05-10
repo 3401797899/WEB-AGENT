@@ -941,15 +941,41 @@ wss.on('connection', (ws) => {
         case 'list_windsurf_workspaces': {
           try {
             const servers = await windsurf.detectLanguageServersWithPath();
-            ws.send(JSON.stringify({
-              type: 'windsurf_workspaces',
-              workspaces: servers.map((s) => ({
-                pid: s.pid,
-                port: s.port,
-                workspaceId: s.workspaceId,
-                workspacePath: s.workspacePath,
-              })),
-            }));
+            if (!servers.length) {
+              ws.send(JSON.stringify({ type: 'windsurf_workspaces', workspaces: [] }));
+              break;
+            }
+            // Fetch ALL trajectories from the first server and extract unique workspace paths
+            const allTrajectories = await windsurf.listTrajectories(servers[0]);
+            const wsMap = new Map(); // workspacePath -> { count, lastModified }
+            for (const t of allTrajectories) {
+              if (t.isArchived) continue;
+              for (const w of (t.workspaces || [])) {
+                const uri = w.workspaceFolderAbsoluteUri || '';
+                if (!uri.startsWith('file://')) continue;
+                const p = decodeURIComponent(uri.slice('file://'.length));
+                const existing = wsMap.get(p);
+                if (!existing || (t.lastModifiedTime || '') > (existing.lastModified || '')) {
+                  wsMap.set(p, {
+                    count: (existing?.count || 0) + 1,
+                    lastModified: t.lastModifiedTime || existing?.lastModified || '',
+                  });
+                } else {
+                  existing.count++;
+                }
+              }
+            }
+            // Build workspace list sorted by most recent activity
+            const workspaces = [...wsMap.entries()]
+              .map(([p, info]) => ({
+                pid: servers[0].pid,
+                port: servers[0].port,
+                workspacePath: p,
+                trajectoryCount: info.count,
+                lastModified: info.lastModified,
+              }))
+              .sort((a, b) => (b.lastModified || '').localeCompare(a.lastModified || ''));
+            ws.send(JSON.stringify({ type: 'windsurf_workspaces', workspaces }));
           } catch (e) {
             ws.send(JSON.stringify({ type: 'error', message: e.message }));
           }
@@ -958,15 +984,13 @@ wss.on('connection', (ws) => {
 
         case 'list_windsurf_trajectories': {
           try {
+            // All trajectories are account-level, accessible from any LS server
             const servers = await windsurf.detectLanguageServersWithPath();
-            const target = msg.workspacePath
-              ? servers.find((s) => s.workspacePath === msg.workspacePath)
-              : servers[0];
-            if (!target) {
-              ws.send(JSON.stringify({ type: 'error', message: 'Windsurf workspace not found' }));
+            if (!servers.length) {
+              ws.send(JSON.stringify({ type: 'error', message: 'No Windsurf server detected' }));
               break;
             }
-            const list = await windsurf.listTrajectories(target);
+            const list = await windsurf.listTrajectories(servers[0]);
             const filtered = list
               .filter((t) => !t.isArchived)
               .filter((t) => {
@@ -978,7 +1002,7 @@ wss.on('connection', (ws) => {
               .sort((a, b) => (b.lastModifiedTime || '').localeCompare(a.lastModifiedTime || ''));
             ws.send(JSON.stringify({
               type: 'windsurf_trajectories',
-              workspacePath: target.workspacePath,
+              workspacePath: msg.workspacePath,
               trajectories: filtered.slice(0, 30),
             }));
           } catch (e) {
