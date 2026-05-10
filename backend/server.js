@@ -403,6 +403,16 @@ async function runWindsurfTurn(session, userMessage, ws) {
       messageToSend = `[工作目录: ${session.cwd}]\n\n${userMessage}`;
       console.log(`[windsurf] injecting cwd context: ${session.cwd}`);
     }
+
+    // On the first message of a new cascade, inject rules to prevent common issues
+    if (messageStartOffset === 0) {
+      const rules = [
+        '[执行规则]',
+        '1. 超过200字符的代码/命令必须写入临时文件执行（如 /tmp/xxx.js），禁止用 node -e/python -c 传超长inline代码',
+        '2. 禁止打开交互式编辑器（vim/nano/less），git操作加 --no-edit --no-pager',
+      ].join('\n');
+      messageToSend = rules + '\n\n' + messageToSend;
+    }
     await windsurf.sendMessage(server, cascadeId, messageToSend, modelUid);
 
     broadcast(session.id, { type: 'event', sessionId: session.id, event: { type: 'cascade.started', cascadeId } });

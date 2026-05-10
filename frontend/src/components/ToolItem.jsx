@@ -156,8 +156,8 @@ function CommandBlock({ item }) {
           ${failed ? 'bg-red-950/30 hover:bg-red-950/50' : 'bg-gray-900/60 hover:bg-gray-800/60'}`}
       >
         <span className={`font-bold font-mono shrink-0 text-[13px] leading-none ${failed ? 'text-red-400' : 'text-emerald-400'}`}>$</span>
-        <code className={`flex-1 min-w-0 truncate font-mono text-[11px] ${failed ? 'text-red-200' : 'text-gray-200'}`}>
-          {command}
+        <code className={`flex-1 min-w-0 truncate font-mono text-[11px] ${failed ? 'text-red-200' : 'text-gray-200'}`} title={command.length > 120 ? command.slice(0, 200) + '…' : command}>
+          {command.length > 120 ? command.slice(0, 120) + '…' : command}
         </code>
         {cwdName && (
           <span className="text-gray-600 font-mono text-[10px] shrink-0 hidden sm:inline">{cwdName}</span>

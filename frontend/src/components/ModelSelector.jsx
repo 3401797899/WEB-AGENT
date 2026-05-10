@@ -2,9 +2,13 @@ import { useState, useRef, useEffect } from 'react';
 
 const MODELS_BY_PROVIDER = {
   windsurf: [
-    { uid: 'claude-sonnet-4-6-thinking', label: 'Claude Sonnet 4.6 Thinking' },
-    { uid: 'claude-opus-4-7',            label: 'Claude Opus 4.7 Medium' },
-    { uid: 'claude-opus-4-6-thinking',   label: 'Claude Opus 4.6 Thinking' },
+    { uid: 'claude-sonnet-4-6-thinking', label: 'Sonnet 4.6 Thinking' },
+    { uid: 'claude-sonnet-4-6',          label: 'Sonnet 4.6' },
+    { uid: 'claude-opus-4-7-high',       label: 'Opus 4.7 High' },
+    { uid: 'claude-opus-4-7-medium',     label: 'Opus 4.7 Medium' },
+    { uid: 'claude-opus-4-7-low',        label: 'Opus 4.7 Low' },
+    { uid: 'claude-opus-4-6-thinking',   label: 'Opus 4.6 Thinking' },
+    { uid: 'claude-opus-4-6',            label: 'Opus 4.6' },
   ],
   codex: [
     { uid: 'gpt-5.5', label: 'GPT-5.5 (default)' },

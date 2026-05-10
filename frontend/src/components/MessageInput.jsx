@@ -13,6 +13,31 @@ function getCapacityStatus(data) {
   return null;
 }
 
+const MAX_CMD_PREVIEW = 120; // chars before truncating
+
+function CommandLineDisplay({ command, expanded, onToggle, className = '' }) {
+  const cmd = command || '(running…)';
+  const isLong = cmd.length > MAX_CMD_PREVIEW;
+  const display = expanded || !isLong
+    ? cmd
+    : cmd.slice(0, MAX_CMD_PREVIEW) + '…';
+  return (
+    <div className={`flex flex-col gap-0.5 ${className}`}>
+      <code className={`text-[11px] font-mono ${expanded ? 'whitespace-pre-wrap break-all max-h-32 overflow-y-auto' : 'truncate'} text-gray-400`}>
+        {display}
+      </code>
+      {isLong && (
+        <button
+          onClick={onToggle}
+          className="self-start text-[10px] text-blue-400/70 hover:text-blue-300 transition-colors"
+        >
+          {expanded ? '▴ 收起' : `▾ 展开（共 ${cmd.length} 字符）`}
+        </button>
+      )}
+    </div>
+  );
+}
+
 const EFFORT_LEVELS = [
   { value: 'low',        label: '低' },
   { value: 'medium',     label: '中' },
@@ -25,6 +50,7 @@ export default function MessageInput({ onSend, onCancel, turnRunning, provider, 
   const [stepInput, setStepInput] = useState('');
   const [listening, setListening] = useState(false);
   const [showTemplates, setShowTemplates] = useState(false);
+  const [cmdExpanded, setCmdExpanded] = useState(false);
   const textareaRef = useRef(null);
   const recognitionRef = useRef(null);
   const outputRef = useRef(null);
@@ -32,6 +58,9 @@ export default function MessageInput({ onSend, onCancel, turnRunning, provider, 
   useEffect(() => {
     if (outputRef.current) outputRef.current.scrollTop = outputRef.current.scrollHeight;
   }, [commandOutput]);
+
+  // Reset expand state when a new command appears
+  useEffect(() => { setCmdExpanded(false); }, [runningStep, pendingApproval]);
 
   const submit = () => {
     const text = value.trim();
@@ -202,7 +231,11 @@ export default function MessageInput({ onSend, onCancel, turnRunning, provider, 
                   <p className={`text-xs font-medium ${commandStuck ? 'text-red-300' : 'text-blue-300'}`}>
                     {commandStuck ? '命令无响应' : '命令执行中'}
                   </p>
-                  <code className="text-[11px] text-gray-400 font-mono break-all">{runningStep.commandLine || '(running…)'}</code>
+                  <CommandLineDisplay
+                    command={runningStep.commandLine}
+                    expanded={cmdExpanded}
+                    onToggle={() => setCmdExpanded((v) => !v)}
+                  />
                 </div>
               </div>
               {commandOutput ? (
@@ -270,7 +303,11 @@ export default function MessageInput({ onSend, onCancel, turnRunning, provider, 
               <span className="text-amber-400 shrink-0 mt-0.5">⚠️</span>
               <div className="flex-1 min-w-0">
                 <p className="text-xs text-amber-300 font-medium">命令需要批准才能运行</p>
-                <code className="text-[11px] text-amber-200/70 font-mono break-all">{pendingApproval.commandLine || '(unknown command)'}</code>
+                <CommandLineDisplay
+                  command={pendingApproval.commandLine || '(unknown command)'}
+                  expanded={cmdExpanded}
+                  onToggle={() => setCmdExpanded((v) => !v)}
+                />
               </div>
             </div>
             <div className="flex gap-2">
