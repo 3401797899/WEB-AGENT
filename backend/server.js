@@ -410,23 +410,18 @@ async function runWindsurfTurn(session, userMessage, ws) {
     broadcastAll({ type: 'session_updated', session: store.get(session.id) });
 
     const modelUid = session.modelUid || 'claude-sonnet-4-6-thinking';
-    // If session.cwd differs from the server's workspace, prepend the target
-    // directory so Cascade knows where to work (no API-level cwd override exists)
     let messageToSend = userMessage;
-    const serverWorkspace = server.workspacePath || '';
-    if (session.cwd && session.cwd !== serverWorkspace) {
-      messageToSend = `[工作目录: ${session.cwd}]\n\n${userMessage}`;
-      console.log(`[windsurf] injecting cwd context: ${session.cwd}`);
-    }
 
-    // On the first message of a new cascade, inject rules to prevent common issues
+    // On the first message of a new cascade, inject context + rules as a clean block
+    // (Windsurf LS has no API-level CWD override, so we embed it in the message)
     if (messageStartOffset === 0) {
-      const rules = [
-        '[执行规则]',
-        '1. 超过200字符的代码/命令必须写入临时文件执行（如 /tmp/xxx.js），禁止用 node -e/python -c 传超长inline代码',
-        '2. 禁止打开交互式编辑器（vim/nano/less），git操作加 --no-edit --no-pager',
-      ].join('\n');
-      messageToSend = rules + '\n\n' + messageToSend;
+      const ctx = [];
+      const serverWorkspace = server.workspacePath || '';
+      if (session.cwd && session.cwd !== serverWorkspace) {
+        ctx.push(`工作目录: ${session.cwd}（所有文件操作和命令执行都必须在此目录下进行）`);
+      }
+      ctx.push('执行规则: (1) 超过200字符的代码必须写入临时文件执行，禁止node -e/python -c传超长代码 (2) 禁止打开vim/nano/less等交互式程序，git加--no-edit --no-pager');
+      messageToSend = `[${ctx.join(' | ')}]\n\n${userMessage}`;
     }
     await windsurf.sendMessage(server, cascadeId, messageToSend, modelUid);
 
