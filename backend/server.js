@@ -12,7 +12,22 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
+
+// Upload directory for attachments
+const UPLOAD_DIR = path.join(os.homedir(), '.ai-relay', 'uploads');
+if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+
+// CORS for dev mode (frontend on different port)
+app.use((_req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  if (_req.method === 'OPTIONS') return res.sendStatus(200);
+  next();
+});
+
+// Serve uploaded files
+app.use('/uploads', express.static(UPLOAD_DIR));
 
 // Active runs: sessionId → { proc, clients: Set<ws>, buffer: events[] }
 const activeRuns = new Map();
@@ -74,7 +89,7 @@ function enrichedEnv() {
 
 // ─── Run a chat turn (codex exec) ─────────────────────────────────────────
 
-function runCodexTurn(session, userMessage, ws) {
+function runCodexTurn(session, userMessage, ws, attachments = []) {
   const config = PROVIDERS[session.provider];
   if (!config) {
     ws.send(JSON.stringify({ type: 'error', message: `Unknown provider: ${session.provider}` }));
@@ -117,7 +132,14 @@ function runCodexTurn(session, userMessage, ws) {
     return;
   }
 
-  proc.stdin.write(userMessage);
+  // Build message with attachment references for the AI
+  let aiMessage = userMessage;
+  if (attachments.length > 0) {
+    const refs = attachments.map(a => `[附件: ${a.path} (${a.name}, ${a.type})]`).join('\n');
+    aiMessage = `${userMessage}\n\n${refs}`;
+  }
+
+  proc.stdin.write(aiMessage);
   proc.stdin.end();
 
   const run = activeRuns.get(session.id) || { clients: new Set(), buffer: [] };
@@ -126,8 +148,9 @@ function runCodexTurn(session, userMessage, ws) {
   run.clients.add(ws);
   activeRuns.set(session.id, run);
 
-  // Persist user message
-  store.appendMessage(session.id, { role: 'user', content: userMessage });
+  // Persist user message (with attachment metadata for UI display)
+  const attachMeta = attachments.map(a => ({ name: a.name, url: a.url, type: a.type, size: a.size }));
+  store.appendMessage(session.id, { role: 'user', content: userMessage, ...(attachMeta.length ? { attachments: attachMeta } : {}) });
   broadcastAll({ type: 'session_updated', session: store.get(session.id) });
 
   // Track final assistant content + items for the turn
@@ -276,30 +299,42 @@ async function startCatchUpPoll(session) {
           if (!seenDoneIdx.has(`approve:${intId}`)) {
             seenDoneIdx.add(`approve:${intId}`);
             run.pendingInteraction = ri;
-            const rc = ri.runCommand || ri.run_command || {};
-            const cmdLine = rc.proposedCommandLine || rc.proposed_command_line
-                         || rc.commandLine || rc.command_line || rc.command || '';
-            // Hard intercept: auto-reject commands that are too long
-            const CMD_MAX_LEN = 500;
-            if (cmdLine.length > CMD_MAX_LEN) {
-              console.log(`[windsurf][catchup] auto-rejecting command (${cmdLine.length} chars): ${cmdLine.slice(0, 80)}...`);
-              windsurf.cancelCascadeSteps(run.serverInfo, cascadeId, [absIdx])
-                .then(() => {
-                  broadcast(session.id, { type: 'command_done', sessionId: session.id });
-                  const hint = `上一条命令被自动拒绝：命令行长度 ${cmdLine.length} 字符，超过终端安全限制（${CMD_MAX_LEN}）。请将代码写入临时文件再执行。继续完成任务。`;
-                  windsurf.sendMessage(run.serverInfo, cascadeId, hint, session.modelUid || 'claude-sonnet-4-6-thinking').catch(() => {});
-                })
-                .catch(() => {
-                  broadcast(session.id, { type: 'command_approval_needed', sessionId: session.id, interactionId: String(intId), commandLine: cmdLine, cascadeId });
-                });
-            } else {
+            const askQ = ri.askUserQuestion || ri.ask_user_question;
+            if (askQ) {
               broadcast(session.id, {
-                type: 'command_approval_needed',
+                type: 'user_question_asked',
                 sessionId: session.id,
                 interactionId: String(intId),
-                commandLine: cmdLine,
+                question: askQ.question || '',
+                options: (askQ.options || []).map(o => ({ label: o.label || '', description: o.description || '' })),
+                allowMultiple: !!askQ.allowMultiple,
                 cascadeId,
               });
+            } else {
+              const rc = ri.runCommand || ri.run_command || {};
+              const cmdLine = rc.proposedCommandLine || rc.proposed_command_line
+                           || rc.commandLine || rc.command_line || rc.command || '';
+              const CMD_MAX_LEN = 500;
+              if (cmdLine.length > CMD_MAX_LEN) {
+                console.log(`[windsurf][catchup] auto-rejecting command (${cmdLine.length} chars): ${cmdLine.slice(0, 80)}...`);
+                windsurf.cancelCascadeSteps(run.serverInfo, cascadeId, [absIdx])
+                  .then(() => {
+                    broadcast(session.id, { type: 'command_done', sessionId: session.id });
+                    const hint = `上一条命令被自动拒绝：命令行长度 ${cmdLine.length} 字符，超过终端安全限制（${CMD_MAX_LEN}）。请将代码写入临时文件再执行。继续完成任务。`;
+                    windsurf.sendMessage(run.serverInfo, cascadeId, hint, session.modelUid || 'claude-sonnet-4-6-thinking').catch(() => {});
+                  })
+                  .catch(() => {
+                    broadcast(session.id, { type: 'command_approval_needed', sessionId: session.id, interactionId: String(intId), commandLine: cmdLine, cascadeId });
+                  });
+              } else {
+                broadcast(session.id, {
+                  type: 'command_approval_needed',
+                  sessionId: session.id,
+                  interactionId: String(intId),
+                  commandLine: cmdLine,
+                  cascadeId,
+                });
+              }
             }
           }
         }
@@ -316,9 +351,13 @@ async function startCatchUpPoll(session) {
           broadcast(session.id, { type: 'event', sessionId: session.id, event: { type: 'cascade.step', step: ev } });
           if (st.status !== 'CORTEX_STEP_STATUS_DONE' && firstStillRunning < 0)
             firstStillRunning = absIdx;
-        } else if (ev.kind === 'tool' && st.status === 'CORTEX_STEP_STATUS_DONE' && !seenDoneIdx.has(absIdx)) {
+        } else if ((ev.kind === 'tool' || ev.kind === 'error') && st.status === 'CORTEX_STEP_STATUS_DONE' && !seenDoneIdx.has(absIdx)) {
           seenDoneIdx.add(absIdx);
-          items.push({ type: ev.tool, summary: ev.summary });
+          if (ev.kind === 'error') {
+            items.push({ type: 'error', summary: ev.text || '', text: ev.text });
+          } else {
+            items.push({ type: ev.tool, summary: ev.summary });
+          }
           broadcast(session.id, { type: 'event', sessionId: session.id, event: { type: 'cascade.step', step: ev } });
         }
       }
@@ -358,7 +397,7 @@ async function startCatchUpPoll(session) {
 
 // ─── Run a chat turn (Windsurf Cascade LS) ────────────────────────────────
 
-async function runWindsurfTurn(session, userMessage, ws) {
+async function runWindsurfTurn(session, userMessage, ws, attachments = []) {
   // Pick the language server matching the session's cwd if possible
   const servers = await windsurf.detectLanguageServersWithPath();
   if (!servers.length) {
@@ -405,12 +444,18 @@ async function runWindsurfTurn(session, userMessage, ws) {
 
     const messageStartOffset = initialStatus.numTotalSteps || 0;
 
-    // Persist user message only after confirming cascade is idle and we can send
-    store.appendMessage(session.id, { role: 'user', content: userMessage });
+    // Persist user message (with attachment metadata for UI display)
+    const attachMeta = attachments.map(a => ({ name: a.name, url: a.url, type: a.type, size: a.size }));
+    store.appendMessage(session.id, { role: 'user', content: userMessage, ...(attachMeta.length ? { attachments: attachMeta } : {}) });
     broadcastAll({ type: 'session_updated', session: store.get(session.id) });
 
     const modelUid = session.modelUid || 'claude-sonnet-4-6-thinking';
     let messageToSend = userMessage;
+    // Append file references so the AI knows about attached files
+    if (attachments.length > 0) {
+      const refs = attachments.map(a => `[附件: ${a.path} (${a.name}, ${a.type})]`).join('\n');
+      messageToSend = `${userMessage}\n\n${refs}`;
+    }
 
     // On the first message of a new cascade, inject context + rules as a clean block
     // (Windsurf LS has no API-level CWD override, so we embed it in the message)
@@ -427,6 +472,24 @@ async function runWindsurfTurn(session, userMessage, ws) {
 
     broadcast(session.id, { type: 'event', sessionId: session.id, event: { type: 'cascade.started', cascadeId } });
 
+    // Quick check: if the first step is a quota error, clear API key cache and retry
+    // once (handles IDE auto-account-switching mid-session)
+    await new Promise((r) => setTimeout(r, 2000));
+    const earlySteps = await windsurf.getTrajectorySteps(server, cascadeId, messageStartOffset).catch(() => []);
+    const firstEv = earlySteps.length ? windsurf.translateStep(earlySteps[0]) : null;
+    if (firstEv?.kind === 'error' && /quota|exhausted/i.test(firstEv.text || '')) {
+      console.log(`[windsurf] quota error detected, clearing API key cache and retrying`);
+      windsurf.clearApiKeyCache();
+      // Start a fresh cascade with the (hopefully) new account key
+      const newCid = await windsurf.startCascade(server);
+      run.cascadeId = newCid;
+      cascadeId = newCid;
+      await windsurf.sendMessage(server, cascadeId, messageToSend, modelUid);
+      broadcast(session.id, { type: 'event', sessionId: session.id, event: { type: 'cascade.started', cascadeId } });
+    }
+
+    console.log(`[windsurf] ${session.id.slice(0, 8)} message sent, polling from offset=${messageStartOffset}`);
+
     // Poll for steps until status is IDLE again.
     // IMPORTANT: Cascade streams a step's text/output while status=RUNNING and
     // updates the step in place. Only advance our "read pointer" past steps
@@ -441,6 +504,7 @@ async function runWindsurfTurn(session, userMessage, ws) {
     // cmdOutputLen: stepIndex → bytes already broadcast (for incremental streaming)
     const cmdOutputLen = {};
     let hasRunningCmd = false; // whether a command step is actively executing
+    let consecutiveIdle = 0; // safety: break if IDLE for many consecutive polls
     for (let i = 0; i < maxIterations; i++) {
       if (run.cancelled) break;
       await new Promise((r) => setTimeout(r, hasRunningCmd ? 200 : 700));
@@ -466,47 +530,54 @@ async function runWindsurfTurn(session, userMessage, ws) {
             if (!seenDoneIdx.has(`approve:${intId}`)) {
               seenDoneIdx.add(`approve:${intId}`);
               console.log(`[windsurf] requestedInteraction at step ${absIdx}:`, JSON.stringify(ri).slice(0, 300));
-              // Store the real interaction object on the run for use by approve_command handler
               run.pendingInteraction = ri;
-              // Extract command line from the runCommand field inside the interaction
-              const rc = ri.runCommand || ri.run_command || {};
-              const cmdLine = rc.proposedCommandLine || rc.proposed_command_line
-                           || rc.commandLine || rc.command_line
-                           || rc.command || '';
-              // Hard intercept: auto-reject commands that are too long (will be truncated by terminal)
-              const CMD_MAX_LEN = 500;
-              if (cmdLine.length > CMD_MAX_LEN) {
-                console.log(`[windsurf] auto-rejecting command (${cmdLine.length} chars > ${CMD_MAX_LEN}): ${cmdLine.slice(0, 80)}...`);
-                windsurf.cancelCascadeSteps(run.serverInfo, cascadeId, [absIdx])
-                  .then(() => {
-                    broadcast(session.id, { type: 'command_done', sessionId: session.id });
-                    // Tell Cascade to rewrite using temp file
-                    const hint = `上一条命令被自动拒绝：命令行长度 ${cmdLine.length} 字符，超过终端安全限制（${CMD_MAX_LEN}）。请将代码写入临时文件（如 /tmp/script.js）再执行，不要使用 node -e / python -c 传递超长inline代码。继续完成任务。`;
-                    windsurf.sendMessage(run.serverInfo, cascadeId, hint, session.modelUid || 'claude-sonnet-4-6-thinking')
-                      .then(() => console.log(`[windsurf] sent rewrite hint after auto-reject`))
-                      .catch((e2) => console.warn(`[windsurf] failed to send rewrite hint: ${e2.message}`));
-                  })
-                  .catch((e) => {
-                    console.warn(`[windsurf] auto-reject cancel failed: ${e.message}`);
-                    // Fall through — still show approval banner so user can manually handle
-                    broadcast(session.id, {
-                      type: 'command_approval_needed',
-                      sessionId: session.id,
-                      interactionId: String(intId),
-                      commandLine: cmdLine,
-                      cascadeId,
-                    });
-                  });
-              } else {
+              const askQ = ri.askUserQuestion || ri.ask_user_question;
+              if (askQ) {
                 broadcast(session.id, {
-                  type: 'command_approval_needed',
+                  type: 'user_question_asked',
                   sessionId: session.id,
                   interactionId: String(intId),
-                  commandLine: cmdLine,
+                  question: askQ.question || '',
+                  options: (askQ.options || []).map(o => ({ label: o.label || '', description: o.description || '' })),
+                  allowMultiple: !!askQ.allowMultiple,
                   cascadeId,
                 });
+              } else {
+                const rc = ri.runCommand || ri.run_command || {};
+                const cmdLine = rc.proposedCommandLine || rc.proposed_command_line
+                             || rc.commandLine || rc.command_line
+                             || rc.command || '';
+                const CMD_MAX_LEN = 500;
+                if (cmdLine.length > CMD_MAX_LEN) {
+                  console.log(`[windsurf] auto-rejecting command (${cmdLine.length} chars > ${CMD_MAX_LEN}): ${cmdLine.slice(0, 80)}...`);
+                  windsurf.cancelCascadeSteps(run.serverInfo, cascadeId, [absIdx])
+                    .then(() => {
+                      broadcast(session.id, { type: 'command_done', sessionId: session.id });
+                      const hint = `上一条命令被自动拒绝：命令行长度 ${cmdLine.length} 字符，超过终端安全限制（${CMD_MAX_LEN}）。请将代码写入临时文件（如 /tmp/script.js）再执行，不要使用 node -e / python -c 传递超长inline代码。继续完成任务。`;
+                      windsurf.sendMessage(run.serverInfo, cascadeId, hint, session.modelUid || 'claude-sonnet-4-6-thinking')
+                        .then(() => console.log(`[windsurf] sent rewrite hint after auto-reject`))
+                        .catch((e2) => console.warn(`[windsurf] failed to send rewrite hint: ${e2.message}`));
+                    })
+                    .catch((e) => {
+                      console.warn(`[windsurf] auto-reject cancel failed: ${e.message}`);
+                      broadcast(session.id, {
+                        type: 'command_approval_needed',
+                        sessionId: session.id,
+                        interactionId: String(intId),
+                        commandLine: cmdLine,
+                        cascadeId,
+                      });
+                    });
+                } else {
+                  broadcast(session.id, {
+                    type: 'command_approval_needed',
+                    sessionId: session.id,
+                    interactionId: String(intId),
+                    commandLine: cmdLine,
+                    cascadeId,
+                  });
+                }
               }
-              // No auto-approve attempt — keep banner until user acts or step resolves
             }
           }
 
@@ -547,7 +618,11 @@ async function runWindsurfTurn(session, userMessage, ws) {
             }
             // Tool items: only commit once DONE so we don't dup
             if (st.status === 'CORTEX_STEP_STATUS_DONE' && !seenDoneIdx.has(absIdx)) {
-              items.push({ type: ev.tool || ev.kind, summary: ev.summary, details: ev.details });
+              if (ev.kind === 'error') {
+                items.push({ type: 'error', summary: ev.text || '', text: ev.text, details: ev.details });
+              } else {
+                items.push({ type: ev.tool || ev.kind, summary: ev.summary, details: ev.details });
+              }
               broadcast(session.id, {
                 type: 'event',
                 sessionId: session.id,
@@ -588,10 +663,20 @@ async function runWindsurfTurn(session, userMessage, ws) {
         nextFetchFrom = firstStillRunning >= 0 ? firstStillRunning : highWaterMark;
       }
       const status = await windsurf.getTrajectoryStatus(server, cascadeId);
+      const isIdle = String(status?.status || '').includes('IDLE');
+      if (isIdle) {
+        consecutiveIdle++;
+      } else {
+        consecutiveIdle = 0;
+      }
+      // Break if: (a) IDLE and we got at least 1 new step, or (b) IDLE for 5+ consecutive polls (safety)
       if (
-        status.status === 'CASCADE_RUN_STATUS_IDLE' &&
-        highWaterMark >= messageStartOffset + 2
+        (isIdle && highWaterMark > messageStartOffset) ||
+        consecutiveIdle >= 5
       ) {
+        if (consecutiveIdle >= 5 && highWaterMark <= messageStartOffset) {
+          console.warn(`[windsurf] ${session.id.slice(0, 8)} IDLE for ${consecutiveIdle} polls with no new steps — breaking`);
+        }
         // One last fetch from messageStartOffset to make sure we have the
         // latest text for the assistant_message (which may have updated
         // between the previous fetch and IDLE).
@@ -614,18 +699,20 @@ async function runWindsurfTurn(session, userMessage, ws) {
         items,
         error: 'cancelled by user',
       });
-    } else if (lastAssistantText) {
+    } else if (lastAssistantText || items.length > 0) {
       store.appendMessage(session.id, {
         role: 'assistant',
         content: lastAssistantText,
         items,
       });
     } else {
+      const detail = `轮次结束但未收到任何回复 (polled ${highWaterMark - messageStartOffset} steps, ${items.length} items, ${consecutiveIdle} idle polls)`;
+      console.warn(`[windsurf] ${session.id.slice(0, 8)} ${detail}`);
       store.appendMessage(session.id, {
         role: 'assistant',
         content: '',
         items,
-        error: 'No response from Cascade',
+        error: detail,
       });
     }
     broadcast(session.id, { type: 'turn_done', sessionId: session.id, exitCode: run.cancelled ? 130 : 0 });
@@ -705,11 +792,12 @@ wss.on('connection', (ws) => {
             break;
           }
           const content = String(msg.content || '').trim();
+          const attachments = msg.attachments || [];
           const config = PROVIDERS[s.provider];
           if (config?.type === 'cascade-ls') {
-            runWindsurfTurn(s, content, ws);
+            runWindsurfTurn(s, content, ws, attachments);
           } else {
-            runCodexTurn(s, content, ws);
+            runCodexTurn(s, content, ws, attachments);
           }
           break;
         }
@@ -728,7 +816,7 @@ wss.on('connection', (ws) => {
               })
               .catch((e) => {
                 run.cancelled = true;
-                broadcast(msg.sessionId, { type: 'approve_failed', sessionId: msg.sessionId, message: e.message });
+                broadcast(msg.sessionId, { type: 'approve_failed', sessionId: msg.sessionId, message: `批准失败: ${e.message}` });
               });
           }
           break;
@@ -783,6 +871,47 @@ wss.on('connection', (ws) => {
                 broadcast(msg.sessionId, { type: 'command_approved', sessionId: msg.sessionId });
               })
               .catch((e) => broadcast(msg.sessionId, { type: 'error', message: `Send input failed: ${e.message}` }));
+          }
+          break;
+        }
+
+        case 'answer_question': {
+          const run = activeRuns.get(msg.sessionId);
+          if (run?.cascadeId && run?.serverInfo) {
+            const ri = run.pendingInteraction || {};
+            const cid = msg.cascadeId || run.cascadeId;
+            const body = {
+              cascadeId: cid,
+              interaction: {
+                trajectoryId: ri.trajectoryId || ri.trajectory_id || cid,
+                stepIndex: ri.stepIndex ?? ri.step_index ?? 0,
+                askUserQuestion: { response: msg.response || '' },
+              },
+            };
+            windsurf.rpcDirect(run.serverInfo, 'HandleCascadeUserInteraction', body)
+              .then(() => {
+                run.pendingInteraction = null;
+                broadcast(msg.sessionId, { type: 'question_answered', sessionId: msg.sessionId });
+              })
+              .catch((e) => {
+                console.warn(`[windsurf] answer_question failed: ${e.message}`);
+                broadcast(msg.sessionId, { type: 'error', message: `Answer failed: ${e.message}` });
+              });
+          }
+          break;
+        }
+
+        case 'skip_question': {
+          const run = activeRuns.get(msg.sessionId);
+          if (run?.cascadeId && run?.serverInfo) {
+            windsurf.resolveOutstandingSteps(run.serverInfo, run.cascadeId)
+              .then(() => {
+                run.pendingInteraction = null;
+                broadcast(msg.sessionId, { type: 'question_answered', sessionId: msg.sessionId });
+              })
+              .catch((e) => {
+                broadcast(msg.sessionId, { type: 'error', message: `Skip failed: ${e.message}` });
+              });
           }
           break;
         }
@@ -1029,6 +1158,17 @@ wss.on('connection', (ws) => {
           break;
         }
 
+        case 'revert_last_exchange': {
+          const result = store.revertLastExchange(msg.sessionId);
+          if (result) {
+            ws.send(JSON.stringify({ type: 'revert_done', sessionId: msg.sessionId, content: result.content }));
+            broadcastAll({ type: 'session_updated', session: result.session });
+          } else {
+            ws.send(JSON.stringify({ type: 'error', message: 'Nothing to revert' }));
+          }
+          break;
+        }
+
         default:
           break;
       }
@@ -1046,6 +1186,38 @@ wss.on('connection', (ws) => {
 
 app.get('/api/providers', (_req, res) => res.json(Object.keys(PROVIDERS)));
 app.get('/api/sessions', (_req, res) => res.json(store.list()));
+
+// File upload endpoint
+app.post('/api/upload', (req, res) => {
+  try {
+    const { sessionId, files } = req.body;
+    if (!files?.length) return res.json({ files: [] });
+
+    const sessionDir = path.join(UPLOAD_DIR, sessionId || 'default');
+    if (!fs.existsSync(sessionDir)) fs.mkdirSync(sessionDir, { recursive: true });
+
+    const saved = [];
+    for (const f of files) {
+      const ext = path.extname(f.name) || '.bin';
+      const safeName = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`;
+      const filepath = path.join(sessionDir, safeName);
+      const buf = Buffer.from(f.data, 'base64');
+      fs.writeFileSync(filepath, buf);
+      saved.push({
+        name: f.name,
+        path: filepath,
+        url: `/uploads/${sessionId || 'default'}/${safeName}`,
+        type: f.type || 'application/octet-stream',
+        size: buf.length,
+      });
+    }
+
+    res.json({ files: saved });
+  } catch (e) {
+    console.error('[upload] error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
 
 // Static frontend
 const frontendDist = path.join(__dirname, '../frontend/dist');

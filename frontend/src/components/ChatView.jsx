@@ -4,7 +4,7 @@ import StreamingTurn from './StreamingTurn';
 
 const PAGE = 50; // messages rendered per page
 
-export default function ChatView({ session, streamingEvents, turnRunning, onLoadHistory, loadingHistory }) {
+export default function ChatView({ session, streamingEvents, turnRunning, onLoadHistory, loadingHistory, onEditLastMessage, onRevertLastExchange }) {
   const scrollRef = useRef(null);
   const [showAll, setShowAll] = useState(false);
 
@@ -85,9 +85,28 @@ export default function ChatView({ session, streamingEvents, turnRunning, onLoad
             </button>
           </div>
         )}
-        {visibleMessages.map((m) => (
-          <MessageBubble key={m.timestamp || m.id || Math.random()} message={m} />
-        ))}
+        {visibleMessages.map((m, i) => {
+          // Find if this is the last user message in the full messages array
+          const globalIdx = messages.length - visibleMessages.length + i;
+          let isLastUser = false;
+          if (m.role === 'user') {
+            let foundLater = false;
+            for (let j = globalIdx + 1; j < messages.length; j++) {
+              if (messages[j].role === 'user') { foundLater = true; break; }
+            }
+            isLastUser = !foundLater;
+          }
+          return (
+            <MessageBubble
+              key={m.timestamp || m.id || Math.random()}
+              message={m}
+              isLastUser={isLastUser}
+              onEdit={() => onEditLastMessage?.(m.content)}
+              onRevert={() => onRevertLastExchange?.()}
+              turnRunning={turnRunning}
+            />
+          );
+        })}
 
         {turnRunning && (
           <StreamingTurn events={streamingEvents} turnRunning={turnRunning} />

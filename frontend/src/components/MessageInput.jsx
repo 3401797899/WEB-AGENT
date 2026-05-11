@@ -45,13 +45,17 @@ const EFFORT_LEVELS = [
   { value: 'extra_high', label: '极高' },
 ];
 
-export default function MessageInput({ onSend, onCancel, turnRunning, provider, modelUid, onModelChange, reasoningEffort, onReasoningEffortChange, windsurfQuota, onRefreshQuota, pendingApproval, onApprove, onReject, runningStep, onCancelStep, onSendStepInput, commandOutput, commandStuck, onCancelTurn, onCancelStepAndHint }) {
+export default function MessageInput({ onSend, onCancel, turnRunning, provider, modelUid, onModelChange, reasoningEffort, onReasoningEffortChange, windsurfQuota, onRefreshQuota, pendingApproval, onApprove, onReject, runningStep, onCancelStep, onSendStepInput, commandOutput, commandStuck, onCancelTurn, onCancelStepAndHint, pendingQuestion, onAnswerQuestion, onSkipQuestion, pendingEditText, onConsumeEditText }) {
   const [value, setValue] = useState('');
   const [stepInput, setStepInput] = useState('');
+  const [questionInput, setQuestionInput] = useState('');
+  const [selectedOptions, setSelectedOptions] = useState([]);
+  const [attachments, setAttachments] = useState([]); // [{ name, type, size, dataUrl }]
   const [listening, setListening] = useState(false);
   const [showTemplates, setShowTemplates] = useState(false);
   const [cmdExpanded, setCmdExpanded] = useState(false);
   const textareaRef = useRef(null);
+  const fileInputRef = useRef(null);
   const recognitionRef = useRef(null);
   const outputRef = useRef(null);
 
@@ -61,17 +65,72 @@ export default function MessageInput({ onSend, onCancel, turnRunning, provider, 
 
   // Reset expand state when a new command appears
   useEffect(() => { setCmdExpanded(false); }, [runningStep, pendingApproval]);
+  // Reset question input when a new question appears
+  useEffect(() => { setQuestionInput(''); setSelectedOptions([]); }, [pendingQuestion]);
+
+  // Populate textarea when editing a previous message
+  useEffect(() => {
+    if (pendingEditText != null) {
+      setValue(pendingEditText);
+      onConsumeEditText?.();
+      setTimeout(() => {
+        const el = textareaRef.current;
+        if (el) {
+          el.style.height = 'auto';
+          el.style.height = Math.min(el.scrollHeight, 160) + 'px';
+          el.focus();
+        }
+      }, 50);
+    }
+  }, [pendingEditText]);
 
   const submit = () => {
     const text = value.trim();
-    if (!text) return;
-    onSend(text);
+    if (!text && attachments.length === 0) return;
+    onSend(text || '(附件)', attachments);
     setValue('');
+    setAttachments([]);
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
   };
 
+  const addFiles = (files) => {
+    if (!files?.length) return;
+    const MAX_SIZE = 20 * 1024 * 1024; // 20MB per file
+    Array.from(files).forEach((file) => {
+      if (file.size > MAX_SIZE) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        setAttachments((prev) => [
+          ...prev,
+          { name: file.name, type: file.type, size: file.size, dataUrl: reader.result },
+        ]);
+      };
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const handlePaste = (e) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    const files = [];
+    for (const item of items) {
+      if (item.kind === 'file') {
+        const file = item.getAsFile();
+        if (file) files.push(file);
+      }
+    }
+    if (files.length > 0) {
+      e.preventDefault();
+      addFiles(files);
+    }
+  };
+
+  const removeAttachment = (idx) => {
+    setAttachments((prev) => prev.filter((_, i) => i !== idx));
+  };
+
   const handleKeyDown = (e) => {
-    if (e.key === 'Enter' && !e.shiftKey && !turnRunning) {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !turnRunning) {
       e.preventDefault();
       submit();
     }
@@ -297,6 +356,81 @@ export default function MessageInput({ onSend, onCancel, turnRunning, provider, 
               </div>
             )}
           </div>
+        ) : pendingQuestion ? (
+          <div className="flex flex-col gap-2.5">
+            <div className="flex items-start gap-2 bg-indigo-950/50 border border-indigo-700/40 rounded-xl px-3 py-2.5">
+              <span className="text-indigo-400 shrink-0 mt-0.5">❓</span>
+              <div className="flex-1 min-w-0">
+                <p className="text-xs text-indigo-300 font-medium mb-0.5">AI 提出了一个问题</p>
+                <p className="text-sm text-white">{pendingQuestion.question || '(no question)'}</p>
+              </div>
+            </div>
+            {pendingQuestion.options?.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {pendingQuestion.options.map((opt, i) => (
+                  <button
+                    key={i}
+                    onClick={() => {
+                      if (pendingQuestion.allowMultiple) {
+                        setSelectedOptions((prev) =>
+                          prev.includes(opt.label) ? prev.filter((l) => l !== opt.label) : [...prev, opt.label]
+                        );
+                      } else {
+                        onAnswerQuestion?.(opt.label);
+                      }
+                    }}
+                    title={opt.description || ''}
+                    className={`px-3 py-2 text-sm font-medium rounded-xl transition-all active:scale-95 ${
+                      selectedOptions.includes(opt.label)
+                        ? 'bg-indigo-600 text-white ring-2 ring-indigo-400'
+                        : 'bg-gray-800 text-gray-200 hover:bg-gray-700 hover:text-white'
+                    }`}
+                  >
+                    {opt.label}
+                    {opt.description && (
+                      <span className="block text-[10px] font-normal text-gray-400 mt-0.5">{opt.description}</span>
+                    )}
+                  </button>
+                ))}
+              </div>
+            )}
+            {pendingQuestion.allowMultiple && selectedOptions.length > 0 && (
+              <button
+                onClick={() => onAnswerQuestion?.(selectedOptions.join(', '))}
+                className="py-2 bg-indigo-600 hover:bg-indigo-500 active:scale-[0.98] text-white text-sm font-medium rounded-xl transition-all"
+              >
+                确认选择（{selectedOptions.length}）
+              </button>
+            )}
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={questionInput}
+                onChange={(e) => setQuestionInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && questionInput.trim()) {
+                    onAnswerQuestion?.(questionInput.trim());
+                    setQuestionInput('');
+                  }
+                }}
+                placeholder="输入自定义回复…"
+                className="flex-1 bg-gray-800 text-white text-sm rounded-xl px-3 py-2 outline-none focus:ring-1 focus:ring-indigo-500 placeholder-gray-600"
+              />
+              <button
+                onClick={() => { if (questionInput.trim()) { onAnswerQuestion?.(questionInput.trim()); setQuestionInput(''); } }}
+                disabled={!questionInput.trim()}
+                className="px-3 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:bg-gray-700 disabled:text-gray-500 text-white text-sm font-medium rounded-xl transition-colors"
+              >
+                回复
+              </button>
+              <button
+                onClick={onSkipQuestion}
+                className="px-3 py-2 bg-gray-700 hover:bg-gray-600 text-gray-300 text-sm font-medium rounded-xl transition-colors"
+              >
+                跳过
+              </button>
+            </div>
+          </div>
         ) : pendingApproval ? (
           <div className="flex flex-col gap-2">
             <div className="flex items-start gap-2 bg-amber-950/50 border border-amber-700/40 rounded-xl px-3 py-2">
@@ -335,21 +469,70 @@ export default function MessageInput({ onSend, onCancel, turnRunning, provider, 
               ✨
             </button>
 
-            <textarea
-              ref={textareaRef}
-              value={value}
-              onChange={handleChange}
-              onKeyDown={handleKeyDown}
-              placeholder={turnRunning ? 'Codex is working…' : 'Send a message…'}
-              disabled={turnRunning}
-              rows={1}
-              className="flex-1 bg-gray-800 text-white text-sm rounded-xl px-3.5 py-2.5 resize-none outline-none focus:ring-1 focus:ring-emerald-500 placeholder-gray-600 disabled:opacity-50"
-              style={{ minHeight: '40px', maxHeight: '160px' }}
-              autoComplete="off"
-              autoCorrect="off"
-              autoCapitalize="sentences"
-              spellCheck={false}
-            />
+            <div className="flex-1 flex flex-col bg-gray-800 rounded-xl overflow-hidden focus-within:ring-1 focus-within:ring-emerald-500">
+              {attachments.length > 0 && (
+                <div className="flex gap-2 px-3 pt-2 pb-1 overflow-x-auto">
+                  {attachments.map((a, i) => (
+                    <div key={i} className="relative shrink-0 group/att">
+                      {a.type?.startsWith('image/') ? (
+                        <img
+                          src={a.dataUrl}
+                          alt={a.name}
+                          className="h-16 w-16 object-cover rounded-lg border border-gray-700"
+                        />
+                      ) : (
+                        <div className="h-16 w-16 flex flex-col items-center justify-center rounded-lg border border-gray-700 bg-gray-750 px-1">
+                          <span className="text-lg">📄</span>
+                          <span className="text-[9px] text-gray-400 truncate w-full text-center">{a.name}</span>
+                        </div>
+                      )}
+                      <button
+                        onClick={() => removeAttachment(i)}
+                        className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-red-600 hover:bg-red-500 text-white text-xs rounded-full flex items-center justify-center opacity-0 group-hover/att:opacity-100 transition-opacity"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <textarea
+                ref={textareaRef}
+                value={value}
+                onChange={handleChange}
+                onKeyDown={handleKeyDown}
+                onPaste={handlePaste}
+                placeholder={turnRunning ? 'AI 工作中…' : '输入消息… ⌘/Ctrl+Enter 发送'}
+                disabled={turnRunning}
+                rows={1}
+                className="flex-1 bg-transparent text-white text-sm px-3.5 py-2.5 resize-none outline-none placeholder-gray-600 disabled:opacity-50"
+                style={{ minHeight: '40px', maxHeight: '160px' }}
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="sentences"
+                spellCheck={false}
+              />
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                accept="image/*,.pdf,.txt,.md,.json,.js,.ts,.jsx,.tsx,.py,.go,.rs,.java,.c,.cpp,.h,.css,.html,.xml,.yaml,.yml,.csv,.log,.sh,.sql"
+                className="hidden"
+                onChange={(e) => { addFiles(e.target.files); e.target.value = ''; }}
+              />
+            </div>
+
+            {!turnRunning && (
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                className="w-10 h-10 shrink-0 flex items-center justify-center bg-gray-800 text-gray-400 hover:text-white hover:bg-gray-700 rounded-xl transition-colors"
+                title="添加附件"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+                </svg>
+              </button>
+            )}
 
             {SpeechRec && !turnRunning && (
               <button
@@ -378,9 +561,9 @@ export default function MessageInput({ onSend, onCancel, turnRunning, provider, 
             ) : (
               <button
                 onClick={submit}
-                disabled={!value.trim()}
+                disabled={!value.trim() && attachments.length === 0}
                 className="w-10 h-10 shrink-0 flex items-center justify-center bg-emerald-600 hover:bg-emerald-500 disabled:bg-gray-700 disabled:text-gray-500 active:scale-95 rounded-xl transition-all"
-                title="Send"
+                title="发送 (⌘/Ctrl+Enter)"
               >
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                   <path d="m22 2-7 20-4-9-9-4z" />

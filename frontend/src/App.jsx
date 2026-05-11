@@ -11,6 +11,11 @@ const WS_URL =
     ? `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}`
     : `ws://${window.location.hostname}:3001`);
 
+const API_BASE =
+  import.meta.env.PROD
+    ? ''
+    : `http://${window.location.hostname}:3001`;
+
 export default function App() {
   // Sessions list (lightweight: id, provider, cwd, title, updatedAt, messageCount)
   const [sessions, setSessions] = useState([]);
@@ -28,9 +33,11 @@ export default function App() {
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [windsurfQuota, setWindsurfQuota] = useState(null);
   const [pendingApproval, setPendingApproval] = useState(null); // { sessionId, interactionId, commandLine, cascadeId }
+  const [pendingQuestion, setPendingQuestion] = useState(null); // { sessionId, interactionId, question, options, allowMultiple, cascadeId }
   const [runningStep, setRunningStep] = useState(null); // { sessionId, stepIndex, commandLine, cascadeId }
   const [commandOutput, setCommandOutput] = useState(''); // live stdout for running command
   const [commandStuck, setCommandStuck] = useState(false); // true when running command appears stuck
+  const [pendingEditText, setPendingEditText] = useState(null); // text to pre-fill input when editing last message
   const lastOutputTimeRef = useRef(0); // timestamp of last command output
   const wsRef = useRef(null);
   const activeIdRef = useRef(null);
@@ -100,6 +107,7 @@ export default function App() {
             setStreamingEvents([]);
             setTurnRunning(false);
             setPendingApproval(null);
+            setPendingQuestion(null);
             setRunningStep(null);
             setCommandOutput('');
             if (msg.session.provider === 'windsurf') {
@@ -155,6 +163,7 @@ export default function App() {
               setTurnRunning(false);
               setStreamingEvents([]);
               setPendingApproval(null);
+              setPendingQuestion(null);
               setRunningStep(null);
               setCommandOutput('');
               // Refresh windsurf quota after each turn
@@ -169,6 +178,7 @@ export default function App() {
               setTurnRunning(false);
               setStreamingEvents([]);
               setPendingApproval(null);
+              setPendingQuestion(null);
               setRunningStep(null);
               setCommandOutput('');
               showToast('Turn cancelled', 'info');
@@ -188,6 +198,23 @@ export default function App() {
           }
           case 'command_approved': {
             setPendingApproval(null);
+            break;
+          }
+          case 'user_question_asked': {
+            if (msg.sessionId === activeIdRef.current) {
+              setPendingQuestion({
+                sessionId: msg.sessionId,
+                interactionId: msg.interactionId,
+                question: msg.question,
+                options: msg.options || [],
+                allowMultiple: !!msg.allowMultiple,
+                cascadeId: msg.cascadeId,
+              });
+            }
+            break;
+          }
+          case 'question_answered': {
+            setPendingQuestion(null);
             break;
           }
           case 'command_running': {
@@ -215,12 +242,18 @@ export default function App() {
           case 'approve_failed': {
             if (msg.sessionId === activeIdRef.current) {
               setPendingApproval(null);
-              showToast('无法自动批准，任务已取消。请在 Windsurf IDE 中手动操作后重试。', 'error');
+              showToast(msg.message || '无法自动批准，任务已取消。请在 Windsurf IDE 中手动操作后重试。', 'error');
             }
             break;
           }
           case 'windsurf_quota': {
             setWindsurfQuota(msg.error ? { error: msg.error } : (msg.data || {}));
+            break;
+          }
+          case 'revert_done': {
+            if (msg.sessionId === activeIdRef.current && msg.content) {
+              setPendingEditText(msg.content);
+            }
             break;
           }
           case 'history_loaded': {
@@ -283,12 +316,42 @@ export default function App() {
     setShowNewModal(false);
   }, [sendWs]);
 
-  const sendMessage = useCallback((content) => {
+  const sendMessage = useCallback(async (content, attachments = []) => {
     if (!activeId || !content.trim()) return;
     setTurnRunning(true);
     setStreamingEvents([]);
-    sendWs({ type: 'send_message', sessionId: activeId, content });
-  }, [activeId, sendWs]);
+
+    let uploadedFiles = [];
+    if (attachments.length > 0) {
+      try {
+        const toUpload = await Promise.all(
+          attachments.map(async (a) => {
+            const base64 = a.dataUrl.split(',')[1];
+            return { name: a.name, type: a.type, data: base64 };
+          })
+        );
+        const res = await fetch(`${API_BASE}/api/upload`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessionId: activeId, files: toUpload }),
+        });
+        const json = await res.json();
+        uploadedFiles = json.files || [];
+      } catch (e) {
+        console.error('Upload failed:', e);
+        showToast(`文件上传失败: ${e.message}`);
+        setTurnRunning(false);
+        return;
+      }
+    }
+
+    sendWs({
+      type: 'send_message',
+      sessionId: activeId,
+      content,
+      attachments: uploadedFiles,
+    });
+  }, [activeId, sendWs, showToast]);
 
   const cancelTurn = useCallback(() => {
     if (!activeId) return;
@@ -319,6 +382,18 @@ export default function App() {
     setLoadingHistory(true);
     sendWs({ type: 'load_windsurf_history', sessionId });
   }, [sendWs]);
+
+  const editLastMessage = useCallback((content) => {
+    if (!activeId || turnRunning) return;
+    sendWs({ type: 'revert_last_exchange', sessionId: activeId });
+    // Optimistically set the text (will also be set via revert_done)
+    setPendingEditText(content);
+  }, [activeId, turnRunning, sendWs]);
+
+  const revertLastExchange = useCallback(() => {
+    if (!activeId || turnRunning) return;
+    sendWs({ type: 'revert_last_exchange', sessionId: activeId });
+  }, [activeId, turnRunning, sendWs]);
 
   return (
     <div className="flex flex-col bg-gray-950 text-white" style={{ height: '100dvh' }}>
@@ -403,6 +478,8 @@ export default function App() {
             turnRunning={turnRunning}
             onLoadHistory={loadWindsurfHistory}
             loadingHistory={loadingHistory}
+            onEditLastMessage={editLastMessage}
+            onRevertLastExchange={revertLastExchange}
           />
         )}
       </main>
@@ -411,6 +488,8 @@ export default function App() {
       {activeSession && (
         <MessageInput
           onSend={sendMessage}
+          pendingEditText={pendingEditText}
+          onConsumeEditText={() => setPendingEditText(null)}
           onCancel={cancelTurn}
           turnRunning={turnRunning}
           provider={activeSession.provider}
@@ -443,6 +522,15 @@ export default function App() {
             sendWs({ type: 'cancel_turn', sessionId: runningStep?.sessionId || activeSession?.id });
             setRunningStep(null);
             setCommandStuck(false);
+          }}
+          pendingQuestion={pendingQuestion}
+          onAnswerQuestion={(response) => {
+            sendWs({ type: 'answer_question', sessionId: pendingQuestion.sessionId, cascadeId: pendingQuestion.cascadeId, response });
+            setPendingQuestion(null);
+          }}
+          onSkipQuestion={() => {
+            sendWs({ type: 'skip_question', sessionId: pendingQuestion.sessionId, cascadeId: pendingQuestion.cascadeId });
+            setPendingQuestion(null);
           }}
           onCancelStepAndHint={(hint) => {
             const sid = runningStep?.sessionId || activeSession?.id;

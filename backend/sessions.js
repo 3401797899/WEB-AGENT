@@ -79,6 +79,23 @@ function appendMessage(id, message) {
   return s;
 }
 
+function revertLastExchange(id) {
+  const s = get(id);
+  if (!s || !s.messages.length) return null;
+  // Find the last user message
+  let lastUserIdx = -1;
+  for (let i = s.messages.length - 1; i >= 0; i--) {
+    if (s.messages[i].role === 'user') { lastUserIdx = i; break; }
+  }
+  if (lastUserIdx === -1) return null;
+  const userContent = s.messages[lastUserIdx].content;
+  // Remove from lastUserIdx onwards (user msg + assistant response)
+  s.messages.splice(lastUserIdx);
+  s.updatedAt = Date.now();
+  persist();
+  return { session: s, content: userContent };
+}
+
 function remove(id) {
   const idx = sessions.findIndex((s) => s.id === id);
   if (idx === -1) return false;
@@ -93,5 +110,6 @@ module.exports = {
   create,
   update,
   appendMessage,
+  revertLastExchange,
   remove,
 };

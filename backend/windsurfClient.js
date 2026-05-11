@@ -122,8 +122,10 @@ async function listTrajectoriesRaw(server) {
 // ─── Decrypt apiKey from Windsurf state ───────────────────────────────────
 
 let _cachedApiKey = null;
+let _apiKeyCacheTime = 0;
 function getApiKey() {
-  if (_cachedApiKey) return _cachedApiKey;
+  // Re-read from DB every 5s to pick up account switches
+  if (_cachedApiKey && Date.now() - _apiKeyCacheTime < 5000) return _cachedApiKey;
   const home = require('os').homedir();
   const dbPath = path.join(
     home,
@@ -139,6 +141,7 @@ function getApiKey() {
       if (j.apiKey) {
         db.close();
         _cachedApiKey = j.apiKey;
+        _apiKeyCacheTime = Date.now();
         return j.apiKey;
       }
     }
@@ -167,7 +170,13 @@ function getApiKey() {
   const arr = JSON.parse(out.toString());
   if (!arr[0] || !arr[0].accessToken) throw new Error('No accessToken in sessions');
   _cachedApiKey = arr[0].accessToken;
+  _apiKeyCacheTime = Date.now();
   return _cachedApiKey;
+}
+
+function clearApiKeyCache() {
+  _cachedApiKey = null;
+  _apiKeyCacheTime = 0;
 }
 
 // ─── Connect/JSON RPC client ──────────────────────────────────────────────
@@ -494,11 +503,17 @@ function translateStep(step) {
         summary: payload?.query || payload?.searchQuery || '',
         details: payload,
       };
-    case 'errorMessage':
+    case 'errorMessage': {
+      // payload = { error: { userErrorMessage, shortError, fullError, errorCode }, shouldShowUser }
+      const err = payload?.error || payload || {};
+      const text = err.userErrorMessage || err.shortError || err.errorMessage
+                || payload?.errorMessage || payload?.message
+                || (typeof payload === 'string' ? payload : JSON.stringify(payload));
       return {
         kind: 'error',
-        text: payload?.errorMessage || JSON.stringify(payload),
+        text,
       };
+    }
     case 'retrieveMemory':
     case 'checkpoint':
     case 'memory':
@@ -538,4 +553,5 @@ module.exports = {
   resolveOutstandingSteps,
   deleteCascade,
   translateStep,
+  clearApiKeyCache,
 };

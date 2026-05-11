@@ -497,33 +497,34 @@ function GenericToolBlock({ item }) {
     label: item.name || item.type || 'Tool',
     color: 'text-gray-400',
   };
-  const summary =
-    item.command || item.path || item.summary || item.query ||
-    (item.input || item.arguments
-      ? JSON.stringify(item.input || item.arguments).slice(0, 80)
-      : '');
+  const errorText = isError ? (item.text || item.summary || '') : '';
+  const summary = isError
+    ? errorText
+    : (item.command || item.path || item.summary || item.query ||
+       (item.input || item.arguments
+         ? JSON.stringify(item.input || item.arguments).slice(0, 80)
+         : ''));
 
   return (
     <div className="my-0.5">
       <button
         onClick={() => setOpen((v) => !v)}
-        className="flex items-center gap-1.5 w-full text-left px-2 py-1 rounded hover:bg-gray-800/50 text-xs transition-colors"
+        className={`flex ${isError ? 'flex-col items-start' : 'items-center'} gap-1.5 w-full text-left px-2 py-1 rounded text-xs transition-colors ${
+          isError ? 'bg-red-950/30 hover:bg-red-950/50' : 'hover:bg-gray-800/50'
+        }`}
       >
-        <span className={`${meta.color} w-4 shrink-0 text-center`}>{meta.icon}</span>
-        <span className={`font-medium ${meta.color}`}>{meta.label}</span>
+        <div className="flex items-center gap-1.5 shrink-0">
+          <span className={`${meta.color} w-4 shrink-0 text-center`}>{meta.icon}</span>
+          <span className={`font-medium ${meta.color}`}>{meta.label}</span>
+          {!isError && item.details && <span className="text-gray-700 shrink-0">{open ? '▾' : '▸'}</span>}
+        </div>
         {summary && (
-          <span className="text-gray-600 font-mono truncate flex-1 min-w-0">{summary}</span>
+          <span className={`min-w-0 ${isError ? 'text-red-400 whitespace-pre-wrap break-words w-full pl-6' : 'text-gray-600 font-mono truncate flex-1'}`}>{summary}</span>
         )}
-        {isError && item.text && !summary && (
-          <span className="text-red-400 truncate flex-1 min-w-0">{item.text}</span>
-        )}
-        <span className="text-gray-700 shrink-0">{open ? '▾' : '▸'}</span>
       </button>
-      {open && (
+      {open && item.details && (
         <pre className="ml-6 mt-0.5 p-2 bg-gray-950 rounded text-[10px] text-gray-400 overflow-x-auto max-h-48 border border-gray-800/40 select-text">
-          {isError && item.text
-            ? item.text
-            : JSON.stringify(item.details ?? item, null, 2)}
+          {JSON.stringify(item.details, null, 2)}
         </pre>
       )}
     </div>
