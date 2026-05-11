@@ -133,7 +133,28 @@ function getApiKey() {
   );
   const db = new Database(dbPath, { readonly: true });
 
-  // Fast path: windsurfAuthStatus contains the actual apiKey in cleartext
+  // Fast path 1: `codeium.windsurf` extension state — this is the key the
+  // Cascade extension itself uses when calling the LS. Account-switcher tools
+  // sometimes update only `windsurfAuthStatus.apiKey` but leave this one
+  // pointing at a different (stale) key, so we must prefer this one to stay
+  // in sync with what the IDE actually authenticates with. Using the wrong
+  // key results in upstream "an internal error occurred (trace ID: ...)"
+  // responses even though CheckChatCapacity succeeds.
+  try {
+    const row = db.prepare("SELECT value FROM ItemTable WHERE key='codeium.windsurf'").get();
+    if (row) {
+      const j = JSON.parse(row.value);
+      const k = j['codeium.apiKey'];
+      if (k) {
+        db.close();
+        _cachedApiKey = k;
+        _apiKeyCacheTime = Date.now();
+        return k;
+      }
+    }
+  } catch (_) {}
+
+  // Fast path 2: windsurfAuthStatus contains the actual apiKey in cleartext
   try {
     const row = db.prepare("SELECT value FROM ItemTable WHERE key='windsurfAuthStatus'").get();
     if (row) {

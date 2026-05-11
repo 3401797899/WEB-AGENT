@@ -32,8 +32,8 @@ export default function ChatView({ session, streamingEvents, turnRunning, onLoad
   }, [session.cwd]);
 
   return (
-    <div ref={scrollRef} className="flex-1 overflow-y-auto px-3 sm:px-6 py-4">
-      <div className="mx-auto max-w-3xl space-y-4">
+    <div ref={scrollRef} className="flex-1 overflow-y-auto overflow-x-hidden px-3 sm:px-6 py-4">
+      <div className="mx-auto max-w-3xl space-y-4 min-w-0">
         {/* Session meta header */}
         <div className="flex items-center justify-center gap-2 text-xs text-gray-500 mb-2">
           <span className="bg-gray-800 px-2 py-0.5 rounded">{session.provider}</span>

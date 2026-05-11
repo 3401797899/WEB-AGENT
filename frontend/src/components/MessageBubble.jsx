@@ -21,13 +21,17 @@ const MessageBubble = memo(function MessageBubble({ message, isLastUser, onEdit,
   });
 
   return (
-    <div className={`flex ${isUser ? 'justify-end' : 'justify-start'} group`}>
-      <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'} max-w-[88%] sm:max-w-[80%]`}>
+    <div className={`flex ${isUser ? 'justify-end' : 'justify-start'} group w-full min-w-0`}>
+      <div className={`flex flex-col ${
+        isUser
+          ? 'items-end max-w-[88%] sm:max-w-[80%]'
+          : 'items-stretch w-[88%] sm:w-[80%]'
+      } min-w-0`}>
       <div
-        className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed shadow-sm overflow-x-auto ${
+        className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed shadow-sm overflow-hidden min-w-0 ${
           isUser
             ? 'bg-emerald-600 text-white rounded-br-md'
-            : 'bg-gray-800 text-gray-100 rounded-bl-md'
+            : 'w-full bg-gray-800 text-gray-100 rounded-bl-md'
         }`}
       >
         {/* Tool / non-message items (file changes, command runs) — only on assistant side */}
@@ -87,6 +91,11 @@ const MessageBubble = memo(function MessageBubble({ message, isLastUser, onEdit,
                   ),
                   a: ({ node, ...props }) => (
                     <a {...props} target="_blank" rel="noopener noreferrer" className="text-emerald-400 underline" />
+                  ),
+                  table: ({ node, children, ...props }) => (
+                    <div className="overflow-x-auto my-1">
+                      <table {...props}>{children}</table>
+                    </div>
                   ),
                 }}
               >

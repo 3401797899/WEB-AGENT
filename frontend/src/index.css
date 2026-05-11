@@ -65,9 +65,17 @@ html, body, #root {
 
 .markdown-body table {
   border-collapse: collapse;
-  margin: 0.5em 0;
+  margin: 0;
   font-size: 0.85em;
 }
+
+.markdown-body .overflow-x-auto {
+  scrollbar-width: thin;
+  scrollbar-color: #374151 transparent;
+}
+.markdown-body .overflow-x-auto::-webkit-scrollbar { height: 4px; }
+.markdown-body .overflow-x-auto::-webkit-scrollbar-thumb { background: #374151; border-radius: 2px; }
+
 .markdown-body th, .markdown-body td {
   border: 1px solid #374151;
   padding: 0.3em 0.6em;

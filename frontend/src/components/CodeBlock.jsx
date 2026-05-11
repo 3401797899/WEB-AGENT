@@ -22,15 +22,15 @@ export default function CodeBlock({ children }) {
   };
 
   return (
-    <div className="relative group my-2">
+    <div className="relative group my-2 max-w-full min-w-0">
       <button
         onClick={handleCopy}
-        className="absolute top-1.5 right-1.5 px-2 py-1 text-[10px] font-medium bg-gray-700/80 hover:bg-gray-600 text-gray-200 rounded opacity-70 group-hover:opacity-100 transition-opacity"
+        className="absolute top-1.5 right-1.5 px-2 py-1 text-[10px] font-medium bg-gray-700/80 hover:bg-gray-600 text-gray-200 rounded opacity-70 group-hover:opacity-100 transition-opacity z-10"
         aria-label="Copy"
       >
         {copied ? '✓ Copied' : 'Copy'}
       </button>
-      <pre ref={ref} className="!bg-gray-950 !p-3 rounded-lg overflow-x-auto text-xs">
+      <pre ref={ref} className="!bg-gray-950 !p-3 rounded-lg overflow-x-auto text-xs max-w-full">
         {children}
       </pre>
     </div>
