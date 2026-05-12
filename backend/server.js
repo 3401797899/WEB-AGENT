@@ -344,13 +344,14 @@ async function startCatchUpPoll(session) {
             run.pendingInteraction = ri;
             const askQ = ri.askUserQuestion || ri.ask_user_question;
             if (askQ) {
+              const qData = askQ.request || askQ;
               broadcast(session.id, {
                 type: 'user_question_asked',
                 sessionId: session.id,
                 interactionId: String(intId),
-                question: askQ.question || '',
-                options: (askQ.options || []).map(o => ({ label: o.label || '', description: o.description || '' })),
-                allowMultiple: !!askQ.allowMultiple,
+                question: qData.question || '',
+                options: (qData.options || []).map(o => ({ label: o.label || '', description: o.description || '' })),
+                allowMultiple: !!qData.allowMultiple,
                 cascadeId,
               });
             } else {
@@ -582,13 +583,14 @@ async function runWindsurfTurn(session, userMessage, ws, attachments = []) {
               run.pendingInteraction = ri;
               const askQ = ri.askUserQuestion || ri.ask_user_question;
               if (askQ) {
+                const qData = askQ.request || askQ;
                 broadcast(session.id, {
                   type: 'user_question_asked',
                   sessionId: session.id,
                   interactionId: String(intId),
-                  question: askQ.question || '',
-                  options: (askQ.options || []).map(o => ({ label: o.label || '', description: o.description || '' })),
-                  allowMultiple: !!askQ.allowMultiple,
+                  question: qData.question || '',
+                  options: (qData.options || []).map(o => ({ label: o.label || '', description: o.description || '' })),
+                  allowMultiple: !!qData.allowMultiple,
                   cascadeId,
                 });
               } else {
