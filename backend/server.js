@@ -341,11 +341,22 @@ async function startCatchUpPoll(session) {
           const intId = ri?.interactionId || ri?.id || absIdx;
           if (!seenDoneIdx.has(`approve:${intId}`)) {
             seenDoneIdx.add(`approve:${intId}`);
-            run.pendingInteraction = ri;
-            const askQ = ri.askUserQuestion || ri.ask_user_question;
-            if (askQ) {
+            // The empty `requestedInteraction.askUserQuestion` lacks trajectoryId/stepIndex;
+            // pull them from the step's toolCall metadata so the answer handler can
+            // correctly target this step on HandleCascadeUserInteraction.
+            const sti = st.metadata?.toolCall?.sourceTrajectoryStepInfo || {};
+            run.pendingInteraction = {
+              ...ri,
+              trajectoryId: ri.trajectoryId || ri.trajectory_id || sti.trajectoryId || sti.trajectory_id,
+              stepIndex: ri.stepIndex ?? ri.step_index ?? sti.stepIndex ?? sti.step_index ?? absIdx,
+            };
+            // askUserQuestion data lives on the step (sibling of requestedInteraction),
+            // not nested inside requestedInteraction (which only carries an empty marker).
+            const askQ = st.askUserQuestion || st.ask_user_question
+                      || ri.askUserQuestion || ri.ask_user_question;
+            if (askQ && (askQ.request || askQ.question)) {
               const qData = askQ.request || askQ;
-              broadcast(session.id, {
+              const payload = {
                 type: 'user_question_asked',
                 sessionId: session.id,
                 interactionId: String(intId),
@@ -353,7 +364,9 @@ async function startCatchUpPoll(session) {
                 options: (qData.options || []).map(o => ({ label: o.label || '', description: o.description || '' })),
                 allowMultiple: !!qData.allowMultiple,
                 cascadeId,
-              });
+              };
+              console.log(`[windsurf][catchup] broadcasting user_question_asked:`, JSON.stringify(payload).slice(0, 800));
+              broadcast(session.id, payload);
             } else {
               const rc = ri.runCommand || ri.run_command || {};
               const cmdLine = rc.proposedCommandLine || rc.proposed_command_line
@@ -579,10 +592,18 @@ async function runWindsurfTurn(session, userMessage, ws, attachments = []) {
             const intId = ri?.interactionId || ri?.id || absIdx;
             if (!seenDoneIdx.has(`approve:${intId}`)) {
               seenDoneIdx.add(`approve:${intId}`);
-              console.log(`[windsurf] requestedInteraction at step ${absIdx}:`, JSON.stringify(ri).slice(0, 300));
-              run.pendingInteraction = ri;
-              const askQ = ri.askUserQuestion || ri.ask_user_question;
-              if (askQ) {
+              console.log(`[windsurf] requestedInteraction at step ${absIdx}:`, JSON.stringify(ri).slice(0, 2000));
+              const sti = st.metadata?.toolCall?.sourceTrajectoryStepInfo || {};
+              run.pendingInteraction = {
+                ...ri,
+                trajectoryId: ri.trajectoryId || ri.trajectory_id || sti.trajectoryId || sti.trajectory_id,
+                stepIndex: ri.stepIndex ?? ri.step_index ?? sti.stepIndex ?? sti.step_index ?? absIdx,
+              };
+              // askUserQuestion data lives on the step (sibling of requestedInteraction),
+              // not nested inside requestedInteraction (which only carries an empty marker).
+              const askQ = st.askUserQuestion || st.ask_user_question
+                        || ri.askUserQuestion || ri.ask_user_question;
+              if (askQ && (askQ.request || askQ.question)) {
                 const qData = askQ.request || askQ;
                 broadcast(session.id, {
                   type: 'user_question_asked',
