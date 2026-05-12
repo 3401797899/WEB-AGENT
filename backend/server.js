@@ -37,9 +37,11 @@ const PROVIDERS = {
   codex: {
     type: 'codex-exec',
     command: process.env.CODEX_CMD || 'codex',
+    args: process.env.CODEX_ARGS || '--dangerously-bypass-approvals-and-sandbox',
   },
   windsurf: {
     type: 'cascade-ls', // talks to running Windsurf IDE's language server
+    args: process.env.WINDSURF_ARGS || '',
   },
 };
 
@@ -87,6 +89,48 @@ function enrichedEnv() {
   };
 }
 
+function splitArgs(value) {
+  if (!value || !String(value).trim()) return [];
+
+  const args = [];
+  let current = '';
+  let quote = null;
+  let escaping = false;
+
+  for (const ch of String(value)) {
+    if (escaping) {
+      current += ch;
+      escaping = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escaping = true;
+      continue;
+    }
+    if (quote) {
+      if (ch === quote) quote = null;
+      else current += ch;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (current) {
+        args.push(current);
+        current = '';
+      }
+      continue;
+    }
+    current += ch;
+  }
+
+  if (escaping) current += '\\';
+  if (current) args.push(current);
+  return args;
+}
+
 // ─── Run a chat turn (codex exec) ─────────────────────────────────────────
 
 function runCodexTurn(session, userMessage, ws, attachments = []) {
@@ -103,15 +147,14 @@ function runCodexTurn(session, userMessage, ws, attachments = []) {
   // We pass `-` so prompt is read from stdin (avoids quoting issues with long messages).
   const modelArgs = session.modelUid ? ['--model', session.modelUid] : [];
   const effortArgs = session.reasoningEffort ? ['-c', `reasoning_effort="${session.reasoningEffort}"`] : [];
-  // Allow codex to write files in the workspace (not read-only sandboxed)
-  const sandboxArgs = ['-s', 'workspace-write'];
+  const providerArgs = splitArgs(config.args);
   let baseArgs;
   if (session.threadId) {
-    baseArgs = ['exec', ...sandboxArgs, '--cd', session.cwd, 'resume',
+    baseArgs = ['exec', ...providerArgs, '--cd', session.cwd, 'resume',
                 ...modelArgs, ...effortArgs, '--json', '--skip-git-repo-check',
                 session.threadId, '-'];
   } else {
-    baseArgs = ['exec', ...modelArgs, ...effortArgs, ...sandboxArgs,
+    baseArgs = ['exec', ...modelArgs, ...effortArgs, ...providerArgs,
                 '--json', '--skip-git-repo-check', '--cd', session.cwd, '-'];
   }
 
@@ -472,13 +515,19 @@ async function runWindsurfTurn(session, userMessage, ws, attachments = []) {
 
     broadcast(session.id, { type: 'event', sessionId: session.id, event: { type: 'cascade.started', cascadeId } });
 
-    // Quick check: if the first step is a quota error, clear API key cache and retry
-    // once (handles IDE auto-account-switching mid-session)
-    await new Promise((r) => setTimeout(r, 2000));
+    // Quick check: if any of the early steps is a quota / rate-limit /
+    // internal error, clear API key cache and retry once (handles IDE
+    // auto-account-switching mid-session via account-pool tools). Errors
+    // typically appear at step 2-3, after system/user_input prefix steps,
+    // so we scan all early steps rather than just the first.
+    await new Promise((r) => setTimeout(r, 2500));
     const earlySteps = await windsurf.getTrajectorySteps(server, cascadeId, messageStartOffset).catch(() => []);
-    const firstEv = earlySteps.length ? windsurf.translateStep(earlySteps[0]) : null;
-    if (firstEv?.kind === 'error' && /quota|exhausted/i.test(firstEv.text || '')) {
-      console.log(`[windsurf] quota error detected, clearing API key cache and retrying`);
+    const errEv = earlySteps
+      .map((s) => windsurf.translateStep(s))
+      .find((ev) => ev?.kind === 'error' &&
+        /quota|exhausted|rate limit|internal error/i.test(ev.text || ''));
+    if (errEv) {
+      console.log(`[windsurf] account-level error ("${(errEv.text||'').slice(0,80)}"), clearing API key cache and retrying`);
       windsurf.clearApiKeyCache();
       // Start a fresh cascade with the (hopefully) new account key
       const newCid = await windsurf.startCascade(server);
@@ -1015,6 +1064,9 @@ wss.on('connection', (ws) => {
               if (PROVIDERS[name] && cfg.command) {
                 PROVIDERS[name].command = cfg.command.trim();
               }
+              if (PROVIDERS[name] && typeof cfg.args === 'string') {
+                PROVIDERS[name].args = cfg.args.trim();
+              }
             }
           }
           ws.send(JSON.stringify({ type: 'providers_updated' }));
@@ -1074,8 +1126,21 @@ wss.on('connection', (ws) => {
               ws.send(JSON.stringify({ type: 'windsurf_workspaces', workspaces: [] }));
               break;
             }
-            // Fetch ALL trajectories from the first server and extract unique workspace paths
-            const allTrajectories = await windsurf.listTrajectories(servers[0]);
+            // Each LS has its own trajectory view; aggregate from ALL servers
+            // and dedupe by cascadeId (keep the most recently modified entry)
+            const byId = new Map();
+            await Promise.all(servers.map(async (s) => {
+              try {
+                const list = await windsurf.listTrajectories(s);
+                for (const t of list) {
+                  const prev = byId.get(t.cascadeId);
+                  if (!prev || (t.lastModifiedTime || '') > (prev.lastModifiedTime || '')) {
+                    byId.set(t.cascadeId, t);
+                  }
+                }
+              } catch (_) {}
+            }));
+            const allTrajectories = [...byId.values()];
             const wsMap = new Map(); // workspacePath -> { count, lastModified }
             for (const t of allTrajectories) {
               if (t.isArchived) continue;
@@ -1113,13 +1178,27 @@ wss.on('connection', (ws) => {
 
         case 'list_windsurf_trajectories': {
           try {
-            // All trajectories are account-level, accessible from any LS server
+            // Each LS has its own trajectory view; aggregate from ALL servers
+            // and dedupe by cascadeId (keep the most recently modified entry).
+            // A trajectory created in workspace X is only visible from X's LS.
             const servers = await windsurf.detectLanguageServersWithPath();
             if (!servers.length) {
               ws.send(JSON.stringify({ type: 'error', message: 'No Windsurf server detected' }));
               break;
             }
-            const list = await windsurf.listTrajectories(servers[0]);
+            const byId = new Map();
+            await Promise.all(servers.map(async (s) => {
+              try {
+                const part = await windsurf.listTrajectories(s);
+                for (const t of part) {
+                  const prev = byId.get(t.cascadeId);
+                  if (!prev || (t.lastModifiedTime || '') > (prev.lastModifiedTime || '')) {
+                    byId.set(t.cascadeId, t);
+                  }
+                }
+              } catch (_) {}
+            }));
+            const list = [...byId.values()];
             const filtered = list
               .filter((t) => !t.isArchived)
               .filter((t) => {

@@ -119,13 +119,95 @@ async function listTrajectoriesRaw(server) {
   }));
 }
 
-// ─── Decrypt apiKey from Windsurf state ───────────────────────────────────
+// ─── Auth: read apiKey + matching identity atomically ─────────────────────
+//
+// Windsurf scatters auth state across two SQLite rows that can desync when
+// account-pool / account-switcher tools rotate trial accounts:
+//
+//   codeium.windsurf.codeium.apiKey        ← what the IDE actually uses for
+//                                            Cascade RPCs (the "live" key)
+//   codeium.windsurf.windsurf.pendingApiKeyMigration
+//                                          ← rotation tools may stage a new
+//                                            key here pending migration
+//   windsurfAuthStatus.apiKey              ← the post-migration target
+//   windsurfAuthStatus.userStatusProtoBinaryBase64
+//                                          ← identity blob (user_id,
+//                                            team_id, plan_name) paired
+//                                            with windsurfAuthStatus.apiKey
+//
+// CRITICAL: identity must match the apiKey we send. Mixing them (e.g.
+// sending apiKey from `codeium.apiKey` with user_id parsed from
+// windsurfAuthStatus when the two point at different accounts) makes the
+// upstream throttle aggressively with "Reached overall message rate limit"
+// or "internal error" responses, even though the IDE on the same machine
+// works fine.
 
-let _cachedApiKey = null;
-let _apiKeyCacheTime = 0;
-function getApiKey() {
-  // Re-read from DB every 5s to pick up account switches
-  if (_cachedApiKey && Date.now() - _apiKeyCacheTime < 5000) return _cachedApiKey;
+let _cachedAuth = null;   // { apiKey, userId, teamId, planName, sessionId }
+let _cachedAuthTime = 0;
+const AUTH_CACHE_MS = 2000;  // short; account-pool can rotate every few seconds
+
+function decodeJwtSessionId(apiKey) {
+  try {
+    const part = (apiKey || '').split('$')[1]?.split('.')[1];
+    if (!part) return null;
+    const pad = '='.repeat((4 - (part.length % 4)) % 4);
+    const payload = JSON.parse(
+      Buffer.from(part + pad, 'base64url').toString('utf8')
+    );
+    return payload.session_id || null;
+  } catch (_) { return null; }
+}
+
+function parseIdentityBlob(b64) {
+  // userStatusProtoBinaryBase64 contains length-prefixed protobuf strings.
+  // Extract user-XXX (32 hex), devin-team$..., and plan name.
+  const out = { userId: null, teamId: null, planName: null };
+  if (!b64) return out;
+  try {
+    const txt = Buffer.from(b64, 'base64').toString('binary');
+    const uid = txt.match(/user-[a-f0-9]{32}/);
+    if (uid) out.userId = uid[0];
+    const tid = txt.match(/devin-team\$[\x20-\x7e]{5,80}?(?=[\x00-\x1f])/);
+    if (tid) out.teamId = tid[0];
+    const plan = txt.match(/\b(Free|Trial|Pro|Teams|Enterprise|Plus)\b/);
+    if (plan) out.planName = plan[1];
+  } catch (_) {}
+  return out;
+}
+
+let _keychainPassword = null;
+function getKeychainPassword() {
+  if (_keychainPassword) return _keychainPassword;
+  try {
+    _keychainPassword = execSync(
+      'security find-generic-password -s "Windsurf Safe Storage" -w',
+      { encoding: 'utf8' }
+    ).trim();
+  } catch (_) { _keychainPassword = null; }
+  return _keychainPassword;
+}
+
+function decryptSessionsBlob(db) {
+  try {
+    const password = getKeychainPassword();
+    if (!password) return null;
+    const sessionsKey =
+      'secret://{"extensionId":"codeium.windsurf","key":"windsurf_auth.sessions"}';
+    const row = db.prepare('SELECT value FROM ItemTable WHERE key=?').get(sessionsKey);
+    if (!row) return null;
+    const enc = Buffer.from(JSON.parse(row.value).data);
+    const key = crypto.pbkdf2Sync(password, 'saltysalt', 1003, 16, 'sha1');
+    const iv = Buffer.alloc(16, ' ');
+    const d = crypto.createDecipheriv('aes-128-cbc', key, iv);
+    const out = Buffer.concat([d.update(enc.slice(3)), d.final()]);
+    const arr = JSON.parse(out.toString());
+    return arr[0]?.accessToken || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function readAuthFresh() {
   const home = require('os').homedir();
   const dbPath = path.join(
     home,
@@ -133,84 +215,175 @@ function getApiKey() {
   );
   const db = new Database(dbPath, { readonly: true });
 
-  // Fast path 1: `codeium.windsurf` extension state — this is the key the
-  // Cascade extension itself uses when calling the LS. Account-switcher tools
-  // sometimes update only `windsurfAuthStatus.apiKey` but leave this one
-  // pointing at a different (stale) key, so we must prefer this one to stay
-  // in sync with what the IDE actually authenticates with. Using the wrong
-  // key results in upstream "an internal error occurred (trace ID: ...)"
-  // responses even though CheckChatCapacity succeeds.
+  let cw = null, wa = null;
   try {
-    const row = db.prepare("SELECT value FROM ItemTable WHERE key='codeium.windsurf'").get();
-    if (row) {
-      const j = JSON.parse(row.value);
-      const k = j['codeium.apiKey'];
-      if (k) {
-        db.close();
-        _cachedApiKey = k;
-        _apiKeyCacheTime = Date.now();
-        return k;
-      }
-    }
+    const r1 = db.prepare("SELECT value FROM ItemTable WHERE key='codeium.windsurf'").get();
+    if (r1) cw = JSON.parse(r1.value);
+  } catch (_) {}
+  try {
+    const r2 = db.prepare("SELECT value FROM ItemTable WHERE key='windsurfAuthStatus'").get();
+    if (r2) wa = JSON.parse(r2.value);
   } catch (_) {}
 
-  // Fast path 2: windsurfAuthStatus contains the actual apiKey in cleartext
-  try {
-    const row = db.prepare("SELECT value FROM ItemTable WHERE key='windsurfAuthStatus'").get();
-    if (row) {
-      const j = JSON.parse(row.value);
-      if (j.apiKey) {
-        db.close();
-        _cachedApiKey = j.apiKey;
-        _apiKeyCacheTime = Date.now();
-        return j.apiKey;
-      }
-    }
-  } catch (_) {}
-
-  // Slow path: decrypt the encrypted sessions blob using macOS Keychain key
-  let password;
-  try {
-    password = execSync('security find-generic-password -s "Windsurf Safe Storage" -w', {
-      encoding: 'utf8',
-    }).trim();
-  } catch (e) {
-    db.close();
-    throw new Error('Windsurf Safe Storage password not found in Keychain');
+  // Priority:
+  // (1) codeium.windsurf.codeium.apiKey — this is the key the IDE Cascade
+  //     renderer reads on each message. Account-pool tools that swap
+  //     accounts by writing directly to this field (alongside updating
+  //     `lastLoginEmail`) give us the freshest live key.
+  // (2) keychain `windsurf_auth.sessions` — what `handleAuthSessionAlt`
+  //     writes. May lag when only codeium.apiKey is swapped.
+  // (3) windsurfAuthStatus.apiKey — UI-level snapshot; can be oldest.
+  let apiKey = null, source = null;
+  if (cw && cw['codeium.apiKey']) {
+    apiKey = cw['codeium.apiKey'];
+    source = 'codeium.apiKey';
   }
-  const sessionsKey =
-    'secret://{"extensionId":"codeium.windsurf","key":"windsurf_auth.sessions"}';
-  const row2 = db.prepare('SELECT value FROM ItemTable WHERE key=?').get(sessionsKey);
+  if (!apiKey) {
+    const kc = decryptSessionsBlob(db);
+    if (kc) { apiKey = kc; source = 'keychain'; }
+  }
+  if (!apiKey && wa?.apiKey) {
+    apiKey = wa.apiKey;
+    source = 'windsurfAuthStatus.apiKey';
+  }
+
+  // Identity (user_id, team_id, plan_name) lives in
+  // windsurfAuthStatus.userStatusProtoBinaryBase64 and is paired with
+  // windsurfAuthStatus.apiKey. Only include identity when our chosen key
+  // equals windsurfAuthStatus.apiKey — otherwise we'd send mismatched
+  // identity, which actually triggers upstream throttling.
+  const identityMatches = apiKey && wa?.apiKey && apiKey === wa.apiKey;
+  let identity = { userId: null, teamId: null, planName: null };
+  if (identityMatches && wa) {
+    identity = parseIdentityBlob(wa.userStatusProtoBinaryBase64);
+  }
+
+  const lastLoginEmail = cw?.lastLoginEmail || null;
+
   db.close();
-  if (!row2) throw new Error('No Windsurf auth sessions in state.vscdb');
-  const enc = Buffer.from(JSON.parse(row2.value).data);
-  const key = crypto.pbkdf2Sync(password, 'saltysalt', 1003, 16, 'sha1');
-  const iv = Buffer.alloc(16, ' ');
-  const d = crypto.createDecipheriv('aes-128-cbc', key, iv);
-  const out = Buffer.concat([d.update(enc.slice(3)), d.final()]);
-  const arr = JSON.parse(out.toString());
-  if (!arr[0] || !arr[0].accessToken) throw new Error('No accessToken in sessions');
-  _cachedApiKey = arr[0].accessToken;
-  _apiKeyCacheTime = Date.now();
-  return _cachedApiKey;
+  if (!apiKey) throw new Error('No Windsurf apiKey available');
+
+  return {
+    apiKey,
+    source,
+    sessionId: decodeJwtSessionId(apiKey),
+    email: lastLoginEmail,
+    userId: identity.userId,
+    teamId: identity.teamId,
+    planName: identity.planName,
+    identityPaired: identityMatches,
+  };
+}
+
+function _refreshAuth() {
+  if (_cachedAuth && Date.now() - _cachedAuthTime < AUTH_CACHE_MS) return _cachedAuth;
+  const fresh = readAuthFresh();
+  // Log once per change so account rotation is visible in logs
+  if (!_cachedAuth || _cachedAuth.sessionId !== fresh.sessionId) {
+    const sidTail = fresh.sessionId
+      ? fresh.sessionId.replace(/^windsurf-session-/, '').slice(0, 12)
+      : '?';
+    console.log(
+      `[windsurf-auth] sid=${sidTail}` +
+      ` source=${fresh.source}` +
+      ` email=${fresh.email || '?'}` +
+      ` paired=${fresh.identityPaired}`
+    );
+  }
+  _cachedAuth = fresh;
+  _cachedAuthTime = Date.now();
+  return fresh;
+}
+
+function getApiKey() {
+  return _refreshAuth().apiKey;
+}
+
+function getIdentity() {
+  const a = _refreshAuth();
+  return {
+    userId: a.userId,
+    teamId: a.teamId,
+    planName: a.planName,
+    paired: a.identityPaired,
+    sessionId: a.sessionId,
+    email: a.email,
+    source: a.source,
+  };
 }
 
 function clearApiKeyCache() {
-  _cachedApiKey = null;
-  _apiKeyCacheTime = 0;
+  _cachedAuth = null;
+  _cachedAuthTime = 0;
 }
 
 // ─── Connect/JSON RPC client ──────────────────────────────────────────────
 
+// Versions and identity must match what the IDE itself sends, otherwise the
+// upstream service rate-limits us as a low-trust client (you'll see
+// "Reached overall message rate limit" even though IDE on same account
+// works fine). Sourced from Windsurf.app/.../product.json.
+//   - ide_version       = product.windsurfVersion (e.g. "2.2.17")
+//   - extension_version = product.codeiumVersion  (e.g. "1.48.2")
+//   - os                = "mac" / "linux" / "windows"  (NOT process.platform's "darwin")
+const EXT_PATH = '/Applications/Windsurf.app/Contents/Resources/app/extensions/windsurf';
+let _productCache = null;
+function getProduct() {
+  if (_productCache) return _productCache;
+  const fs = require('fs');
+  const fallback = { ideVersion: '2.2.17', extVersion: '1.48.2' };
+  try {
+    const p = JSON.parse(
+      fs.readFileSync('/Applications/Windsurf.app/Contents/Resources/app/product.json', 'utf8')
+    );
+    _productCache = {
+      ideVersion: p.windsurfVersion || fallback.ideVersion,
+      extVersion: p.codeiumVersion || fallback.extVersion,
+    };
+  } catch (_) {
+    _productCache = fallback;
+  }
+  return _productCache;
+}
+
+const OS_NAME =
+  process.platform === 'darwin' ? 'mac' :
+  process.platform === 'win32'  ? 'windows' : 'linux';
+
+// session_id is a UUID string; request_id is uint64 (decimal string).
+// Confirmed by tcpdump on IDE → LS traffic.
+const SESSION_ID = require('crypto').randomUUID();
+let _reqCounter = 0;
+function nextRequestId() {
+  _reqCounter = (_reqCounter + 1) >>> 0;
+  return String(_reqCounter);
+}
+
 function buildMetadata(apiKey) {
-  return {
+  const { ideVersion, extVersion } = getProduct();
+  const id = getIdentity();
+  const md = {
     ide_name: 'windsurf',
-    ide_version: '2.1.32',
-    extension_name: 'codeium.windsurf',
-    extension_version: '1.110.1',
+    ide_type: 'IDE_TYPE_WINDSURF',
+    ide_version: ideVersion,
+    // Real wire value is just "windsurf" (NOT "codeium.windsurf");
+    // mismatched extension_name causes the upstream to bucket us as a
+    // low-trust client and rate-limit aggressively.
+    extension_name: 'windsurf',
+    extension_version: extVersion,
     api_key: apiKey,
     locale: 'en',
+    os: OS_NAME,
+    session_id: SESSION_ID,
+    request_id: nextRequestId(),
+    extension_path: EXT_PATH,
   };
+  // These three are the difference between "trusted IDE bucket" and
+  // "anonymous client" rate limit on the upstream.
+  if (id.userId)   md.user_id        = id.userId;
+  if (id.teamId)   md.force_team_id  = id.teamId;
+  if (id.planName) md.plan_name      = id.planName;
+  return md;
 }
 
 async function rpc(server, method, body) {
@@ -560,6 +733,7 @@ module.exports = {
   detectLanguageServers,
   detectLanguageServersWithPath,
   getApiKey,
+  getIdentity,
   checkCapacity,
   getQuotaFromDb,
   listTrajectories,

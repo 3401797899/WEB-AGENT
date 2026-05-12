@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 
 const DEFAULTS = {
-  codex:    { command: 'codex',    args: '' },
+  codex:    { command: 'codex',    args: '--dangerously-bypass-approvals-and-sandbox' },
   windsurf: { command: 'windsurf', args: '' },
 };
 

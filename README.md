@@ -49,12 +49,16 @@ Override provider commands via environment variables:
 | Variable        | Default    | Example                        |
 |-----------------|------------|--------------------------------|
 | `CODEX_CMD`     | `codex`    | `/usr/local/bin/codex`        |
-| `CODEX_ARGS`    | *(empty)*  | `--model gpt-4o`              |
+| `CODEX_ARGS`    | `--dangerously-bypass-approvals-and-sandbox` | `--sandbox danger-full-access` |
 | `WINDSURF_CMD`  | `windsurf` | `/Applications/Windsurf.app/Contents/MacOS/windsurf` |
 | `WINDSURF_ARGS` | *(empty)*  | `--cli`                       |
 | `PORT`          | `3001`     | `8080`                        |
 
 Example:
 ```bash
-CODEX_ARGS="--model gpt-4o" npm run dev:backend
+CODEX_ARGS="--sandbox danger-full-access" npm run dev:backend
 ```
+
+By default Codex sessions are started without sandboxing or approval prompts so
+the web UI can operate with full local permissions. To use a safer mode, override
+`CODEX_ARGS` or edit Provider Settings in the UI.
