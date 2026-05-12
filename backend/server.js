@@ -344,7 +344,10 @@ async function startCatchUpPoll(session) {
             // The empty `requestedInteraction.askUserQuestion` lacks trajectoryId/stepIndex;
             // pull them from the step's toolCall metadata so the answer handler can
             // correctly target this step on HandleCascadeUserInteraction.
-            const sti = st.metadata?.toolCall?.sourceTrajectoryStepInfo || {};
+            const sti = st.metadata?.sourceTrajectoryStepInfo
+                     || st.metadata?.source_trajectory_step_info
+                     || st.metadata?.toolCall?.sourceTrajectoryStepInfo
+                     || {};
             run.pendingInteraction = {
               ...ri,
               trajectoryId: ri.trajectoryId || ri.trajectory_id || sti.trajectoryId || sti.trajectory_id,
@@ -366,6 +369,7 @@ async function startCatchUpPoll(session) {
                 cascadeId,
               };
               console.log(`[windsurf][catchup] broadcasting user_question_asked:`, JSON.stringify(payload).slice(0, 800));
+              run.lastPendingPayload = payload;
               broadcast(session.id, payload);
             } else {
               const rc = ri.runCommand || ri.run_command || {};
@@ -593,7 +597,10 @@ async function runWindsurfTurn(session, userMessage, ws, attachments = []) {
             if (!seenDoneIdx.has(`approve:${intId}`)) {
               seenDoneIdx.add(`approve:${intId}`);
               console.log(`[windsurf] requestedInteraction at step ${absIdx}:`, JSON.stringify(ri).slice(0, 2000));
-              const sti = st.metadata?.toolCall?.sourceTrajectoryStepInfo || {};
+              const sti = st.metadata?.sourceTrajectoryStepInfo
+                       || st.metadata?.source_trajectory_step_info
+                       || st.metadata?.toolCall?.sourceTrajectoryStepInfo
+                       || {};
               run.pendingInteraction = {
                 ...ri,
                 trajectoryId: ri.trajectoryId || ri.trajectory_id || sti.trajectoryId || sti.trajectory_id,
@@ -605,7 +612,7 @@ async function runWindsurfTurn(session, userMessage, ws, attachments = []) {
                         || ri.askUserQuestion || ri.ask_user_question;
               if (askQ && (askQ.request || askQ.question)) {
                 const qData = askQ.request || askQ;
-                broadcast(session.id, {
+                const payload = {
                   type: 'user_question_asked',
                   sessionId: session.id,
                   interactionId: String(intId),
@@ -613,7 +620,9 @@ async function runWindsurfTurn(session, userMessage, ws, attachments = []) {
                   options: (qData.options || []).map(o => ({ label: o.label || '', description: o.description || '' })),
                   allowMultiple: !!qData.allowMultiple,
                   cascadeId,
-                });
+                };
+                run.lastPendingPayload = payload;
+                broadcast(session.id, payload);
               } else {
                 const rc = ri.runCommand || ri.run_command || {};
                 const cmdLine = rc.proposedCommandLine || rc.proposed_command_line
@@ -844,6 +853,11 @@ wss.on('connection', (ws) => {
             for (const buffered of (run.buffer || [])) {
               ws.send(buffered);
             }
+            // Re-send any pending user-facing interaction (e.g. askUserQuestion)
+            // so that a reconnected client sees the waiting banner again.
+            if (run.lastPendingPayload) {
+              ws.send(JSON.stringify(run.lastPendingPayload));
+            }
           } else if (s.provider === 'windsurf' && s.threadId) {
             // No active run tracked — check if Windsurf is still running this cascade
             // and start a catch-up poll if so (fire-and-forget)
@@ -884,6 +898,7 @@ wss.on('connection', (ws) => {
             windsurf.approveInteraction(run.serverInfo, cid, interaction)
               .then(() => {
                 run.pendingInteraction = null;
+                run.lastPendingPayload = null;
                 broadcast(msg.sessionId, { type: 'command_approved', sessionId: msg.sessionId });
               })
               .catch((e) => {
@@ -952,17 +967,27 @@ wss.on('connection', (ws) => {
           if (run?.cascadeId && run?.serverInfo) {
             const ri = run.pendingInteraction || {};
             const cid = msg.cascadeId || run.cascadeId;
+            // CortexStepAskUserQuestion.Response is a oneof: selectedOptions(indices) | userInput(string).
+            // Sending a bare string for `response` causes the proto unmarshaler to fail.
+            const indices = Array.isArray(msg.selectedIndices)
+              ? msg.selectedIndices.filter((n) => Number.isInteger(n))
+              : [];
+            const responseProto = indices.length
+              ? { selectedOptions: { indices } }
+              : { userInput: String(msg.response || '') };
             const body = {
               cascadeId: cid,
               interaction: {
                 trajectoryId: ri.trajectoryId || ri.trajectory_id || cid,
                 stepIndex: ri.stepIndex ?? ri.step_index ?? 0,
-                askUserQuestion: { response: msg.response || '' },
+                askUserQuestion: { response: responseProto },
               },
             };
+            console.log(`[windsurf] answer_question body:`, JSON.stringify(body).slice(0, 400));
             windsurf.rpcDirect(run.serverInfo, 'HandleCascadeUserInteraction', body)
               .then(() => {
                 run.pendingInteraction = null;
+                run.lastPendingPayload = null;
                 broadcast(msg.sessionId, { type: 'question_answered', sessionId: msg.sessionId });
               })
               .catch((e) => {
@@ -979,6 +1004,7 @@ wss.on('connection', (ws) => {
             windsurf.resolveOutstandingSteps(run.serverInfo, run.cascadeId)
               .then(() => {
                 run.pendingInteraction = null;
+                run.lastPendingPayload = null;
                 broadcast(msg.sessionId, { type: 'question_answered', sessionId: msg.sessionId });
               })
               .catch((e) => {

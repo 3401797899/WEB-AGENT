@@ -373,15 +373,15 @@ export default function MessageInput({ onSend, onCancel, turnRunning, provider, 
                     onClick={() => {
                       if (pendingQuestion.allowMultiple) {
                         setSelectedOptions((prev) =>
-                          prev.includes(opt.label) ? prev.filter((l) => l !== opt.label) : [...prev, opt.label]
+                          prev.includes(i) ? prev.filter((x) => x !== i) : [...prev, i]
                         );
                       } else {
-                        onAnswerQuestion?.(opt.label);
+                        onAnswerQuestion?.(opt.label, [i]);
                       }
                     }}
                     title={opt.description || ''}
                     className={`px-3 py-2 text-sm font-medium rounded-xl transition-all active:scale-95 ${
-                      selectedOptions.includes(opt.label)
+                      selectedOptions.includes(i)
                         ? 'bg-indigo-600 text-white ring-2 ring-indigo-400'
                         : 'bg-gray-800 text-gray-200 hover:bg-gray-700 hover:text-white'
                     }`}
@@ -396,7 +396,10 @@ export default function MessageInput({ onSend, onCancel, turnRunning, provider, 
             )}
             {pendingQuestion.allowMultiple && selectedOptions.length > 0 && (
               <button
-                onClick={() => onAnswerQuestion?.(selectedOptions.join(', '))}
+                onClick={() => {
+                  const labels = selectedOptions.map((i) => pendingQuestion.options[i]?.label).filter(Boolean);
+                  onAnswerQuestion?.(labels.join(', '), [...selectedOptions]);
+                }}
                 className="py-2 bg-indigo-600 hover:bg-indigo-500 active:scale-[0.98] text-white text-sm font-medium rounded-xl transition-all"
               >
                 确认选择（{selectedOptions.length}）

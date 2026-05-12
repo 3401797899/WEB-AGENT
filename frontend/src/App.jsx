@@ -524,8 +524,14 @@ export default function App() {
             setCommandStuck(false);
           }}
           pendingQuestion={pendingQuestion}
-          onAnswerQuestion={(response) => {
-            sendWs({ type: 'answer_question', sessionId: pendingQuestion.sessionId, cascadeId: pendingQuestion.cascadeId, response });
+          onAnswerQuestion={(response, selectedIndices) => {
+            sendWs({
+              type: 'answer_question',
+              sessionId: pendingQuestion.sessionId,
+              cascadeId: pendingQuestion.cascadeId,
+              response,
+              selectedIndices: selectedIndices || null,
+            });
             setPendingQuestion(null);
           }}
           onSkipQuestion={() => {
