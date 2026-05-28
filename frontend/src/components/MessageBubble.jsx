@@ -30,7 +30,7 @@ const MessageBubble = memo(function MessageBubble({ message, isLastUser, onEdit,
       <div
         className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed shadow-sm overflow-hidden min-w-0 ${
           isUser
-            ? 'bg-emerald-600 text-white rounded-br-md'
+            ? 'max-w-full bg-emerald-600 text-white rounded-br-md'
             : 'w-full bg-gray-800 text-gray-100 rounded-bl-md'
         }`}
       >
