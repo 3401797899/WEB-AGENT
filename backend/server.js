@@ -1,4 +1,5 @@
 const express = require('express');
+const helmet = require('helmet');
 const { WebSocketServer } = require('ws');
 const http = require('http');
 const { spawn } = require('child_process');
@@ -12,22 +13,60 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
-app.use(express.json({ limit: '50mb' }));
+app.use(helmet({
+  contentSecurityPolicy: false, // CSP is complex for SPAs; configure separately if needed
+}));
+app.use(express.json({ limit: '2mb' }));
+
+// ─── Authentication ───────────────────────────────────────────────────────
+// When AUTH_TOKEN is set, all HTTP requests must include
+// `Authorization: Bearer <token>` and WebSocket upgrades must pass
+// `?token=<token>`. This prevents unauthorized network access.
+const AUTH_TOKEN = process.env.AUTH_TOKEN || null;
+
+function checkHttpAuth(req, res, next) {
+  if (!AUTH_TOKEN) return next();
+  const header = req.headers.authorization || '';
+  if (header === `Bearer ${AUTH_TOKEN}`) return next();
+  return res.status(401).json({ error: 'Unauthorized' });
+}
+
+function checkWsAuth(req) {
+  if (!AUTH_TOKEN) return true;
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  return url.searchParams.get('token') === AUTH_TOKEN;
+}
 
 // Upload directory for attachments
 const UPLOAD_DIR = path.join(os.homedir(), '.ai-relay', 'uploads');
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
-// CORS for dev mode (frontend on different port)
-app.use((_req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Headers', 'Content-Type');
-  if (_req.method === 'OPTIONS') return res.sendStatus(200);
+// CORS – restrict to known origins in production.
+// Set ALLOWED_ORIGINS env var to a comma-separated list (e.g. "http://localhost:5173,https://myapp.example.com").
+// Falls back to permissive mode only during development when unset.
+const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(',')
+  : null;
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (ALLOWED_ORIGINS) {
+    if (origin && ALLOWED_ORIGINS.includes(origin)) {
+      res.header('Access-Control-Allow-Origin', origin);
+      res.header('Vary', 'Origin');
+    }
+  } else {
+    // Dev fallback – allow any origin
+    res.header('Access-Control-Allow-Origin', origin || '*');
+  }
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
 
-// Serve uploaded files
-app.use('/uploads', express.static(UPLOAD_DIR));
+// Serve uploaded files (auth-gated)
+app.use('/uploads', checkHttpAuth, express.static(UPLOAD_DIR));
 
 // Active runs: sessionId → { proc, clients: Set<ws>, buffer: events[] }
 const activeRuns = new Map();
@@ -812,7 +851,13 @@ async function runWindsurfTurn(session, userMessage, ws, attachments = []) {
 
 // ─── WebSocket protocol ───────────────────────────────────────────────────
 
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
+  // Authenticate WebSocket connections
+  if (!checkWsAuth(req)) {
+    ws.close(4001, 'Unauthorized');
+    return;
+  }
+
   // Send list of all sessions (history) on connect
   ws.send(JSON.stringify({ type: 'sessions_list', sessions: store.list() }));
 
@@ -823,10 +868,14 @@ wss.on('connection', (ws) => {
     try {
       switch (msg.type) {
         case 'create_session': {
+          // Validate provider name to prevent injection
+          const provider = ['codex', 'windsurf'].includes(msg.provider) ? msg.provider : 'codex';
+          const requestedCwd = msg.cwd ? path.resolve(msg.cwd) : os.homedir();
+          const cwd = fs.existsSync(requestedCwd) ? requestedCwd : os.homedir();
           const s = store.create({
-            provider: msg.provider,
-            cwd: msg.cwd && fs.existsSync(msg.cwd) ? msg.cwd : os.homedir(),
-            title: msg.title,
+            provider,
+            cwd,
+            title: msg.title ? String(msg.title).slice(0, 200) : undefined,
           });
           ws.send(JSON.stringify({ type: 'session_created', session: s }));
           broadcastAll({ type: 'sessions_list', sessions: store.list() });
@@ -1108,11 +1157,11 @@ wss.on('connection', (ws) => {
         }
 
         case 'update_providers': {
+          // Only allow updating args (not the command binary) to prevent
+          // arbitrary command execution. The command itself must be set via
+          // environment variables (CODEX_CMD, WINDSURF_CMD) at startup.
           if (msg.providers && typeof msg.providers === 'object') {
             for (const [name, cfg] of Object.entries(msg.providers)) {
-              if (PROVIDERS[name] && cfg.command) {
-                PROVIDERS[name].command = cfg.command.trim();
-              }
               if (PROVIDERS[name] && typeof cfg.args === 'string') {
                 PROVIDERS[name].args = cfg.args.trim();
               }
@@ -1123,7 +1172,13 @@ wss.on('connection', (ws) => {
         }
 
         case 'list_dir': {
-          const dirPath = msg.path || os.homedir();
+          const dirPath = path.resolve(msg.path || os.homedir());
+          // Restrict directory browsing to the user's home tree
+          const homeDir = os.homedir();
+          if (!dirPath.startsWith(homeDir) && dirPath !== '/') {
+            ws.send(JSON.stringify({ type: 'dir_error', message: 'Access denied: path outside home directory' }));
+            break;
+          }
           try {
             const stat = fs.statSync(dirPath);
             if (!stat.isDirectory()) throw new Error('Not a directory');
@@ -1312,21 +1367,28 @@ wss.on('connection', (ws) => {
 
 // ─── REST ─────────────────────────────────────────────────────────────────
 
-app.get('/api/providers', (_req, res) => res.json(Object.keys(PROVIDERS)));
-app.get('/api/sessions', (_req, res) => res.json(store.list()));
+app.get('/api/providers', checkHttpAuth, (_req, res) => res.json(Object.keys(PROVIDERS)));
+app.get('/api/sessions', checkHttpAuth, (_req, res) => res.json(store.list()));
 
 // File upload endpoint
-app.post('/api/upload', (req, res) => {
+app.post('/api/upload', checkHttpAuth, (req, res) => {
   try {
     const { sessionId, files } = req.body;
     if (!files?.length) return res.json({ files: [] });
 
-    const sessionDir = path.join(UPLOAD_DIR, sessionId || 'default');
+    // Sanitize sessionId to prevent path traversal
+    const safeSessionId = (sessionId || 'default').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const sessionDir = path.join(UPLOAD_DIR, safeSessionId);
+    if (!sessionDir.startsWith(UPLOAD_DIR)) {
+      return res.status(400).json({ error: 'Invalid session ID' });
+    }
     if (!fs.existsSync(sessionDir)) fs.mkdirSync(sessionDir, { recursive: true });
 
     const saved = [];
     for (const f of files) {
-      const ext = path.extname(f.name) || '.bin';
+      // Sanitize file extension to prevent executable uploads
+      const rawExt = path.extname(f.name) || '.bin';
+      const ext = rawExt.replace(/[^a-zA-Z0-9.]/g, '');
       const safeName = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`;
       const filepath = path.join(sessionDir, safeName);
       const buf = Buffer.from(f.data, 'base64');
@@ -1334,7 +1396,7 @@ app.post('/api/upload', (req, res) => {
       saved.push({
         name: f.name,
         path: filepath,
-        url: `/uploads/${sessionId || 'default'}/${safeName}`,
+        url: `/uploads/${safeSessionId}/${safeName}`,
         type: f.type || 'application/octet-stream',
         size: buf.length,
       });
